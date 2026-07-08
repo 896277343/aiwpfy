@@ -29,6 +29,7 @@ If you use your own OpenAI-compatible provider, configure:
 - `Model`: the model name required by your provider.
 - `API Endpoint`: the full endpoint URL.
 - `API Format`: choose the matching API shape.
+- `Request timeout`: seconds WordPress should wait for each API request.
 
 Examples:
 
@@ -49,6 +50,7 @@ Examples:
 - Elementor content is translated from `_elementor_data`; only common visible text fields are translated.
 - If you use other page builders that store content in custom post meta, add meta keys through the `pot_openai_translator_copy_meta_keys` filter to copy them. Custom translation support can be added by extending the plugin for that builder's data format.
 - Very long pages may need a larger `Max output tokens` setting or may need to be translated in sections.
+- If you see `cURL error 28`, increase `Request timeout` first. If it still happens with `0 bytes received`, the WordPress server may be unable to reach your API endpoint or the provider may not send a response before closing.
 
 ## Example meta copy filter
 
