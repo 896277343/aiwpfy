@@ -1,0 +1,61 @@
+# Polylang OpenAI Translator
+
+A small WordPress plugin that works alongside Polylang to translate posts, pages, and other public Polylang-managed post types with the OpenAI Responses API.
+
+## What it does
+
+- Adds a settings page at `Settings -> Polylang OpenAI Translator`.
+- Stores your API key in WordPress options and sends requests only from the server.
+- Supports official OpenAI endpoints and OpenAI-compatible API providers.
+- Adds an `OpenAI Translation` box in the post editor.
+- Creates a draft translation for the selected target language, or updates the existing linked translation.
+- Uses Polylang APIs to set the target language and link translations.
+- Preserves Gutenberg block comments, HTML, shortcodes, URLs, product codes, featured image, page template, and public taxonomy terms where possible.
+- Translates Elementor page content stored in `_elementor_data` while preserving Elementor sections, widgets, IDs, images, links, and style settings.
+
+## Install
+
+1. Copy the `polylang-openai-translator` folder into `wp-content/plugins/`.
+2. Activate `Polylang` first.
+3. Activate `Polylang OpenAI Translator`.
+4. Open `Settings -> Polylang OpenAI Translator`.
+5. Add your API key, model, endpoint URL, and API format.
+
+## OpenAI-compatible API setup
+
+If you use your own OpenAI-compatible provider, configure:
+
+- `OpenAI API Key`: the key required by your provider.
+- `Model`: the model name required by your provider.
+- `API Endpoint`: the full endpoint URL.
+- `API Format`: choose the matching API shape.
+
+Examples:
+
+- Official OpenAI Responses API: `https://api.openai.com/v1/responses`, format `Responses API`.
+- Most compatible providers: `https://your-api-domain.com/v1/chat/completions`, format `Chat Completions`.
+
+## Use
+
+1. Edit the original page or post.
+2. In the `OpenAI Translation` box, select a target language.
+3. Click `Translate with OpenAI`.
+4. Open the created draft translation, review it, then publish it.
+
+## Notes
+
+- The plugin intentionally saves translated content as a draft so a human can review before publishing.
+- Standard WordPress/Gutenberg content is translated from normal title, excerpt, and content fields.
+- Elementor content is translated from `_elementor_data`; only common visible text fields are translated.
+- If you use other page builders that store content in custom post meta, add meta keys through the `pot_openai_translator_copy_meta_keys` filter to copy them. Custom translation support can be added by extending the plugin for that builder's data format.
+- Very long pages may need a larger `Max output tokens` setting or may need to be translated in sections.
+
+## Example meta copy filter
+
+```php
+add_filter( 'pot_openai_translator_copy_meta_keys', function ( $keys ) {
+	$keys[] = '_yoast_wpseo_title';
+	$keys[] = '_yoast_wpseo_metadesc';
+	return $keys;
+} );
+```

@@ -1,0 +1,835 @@
+<?php
+/**
+ * Plugin Name: Polylang OpenAI Translator
+ * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
+ * Version: 0.1.3
+ * Author: Codex
+ * Requires at least: 6.0
+ * Requires PHP: 7.4
+ * Text Domain: polylang-openai-translator
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+final class POT_Polylang_OpenAI_Translator {
+	private const OPTION_KEY = 'pot_openai_translator_options';
+	private const NONCE_ACTION = 'pot_translate_post';
+
+	public static function boot(): void {
+		add_action( 'admin_init', array( __CLASS__, 'register_settings' ) );
+		add_action( 'admin_menu', array( __CLASS__, 'register_settings_page' ) );
+		add_action( 'admin_notices', array( __CLASS__, 'maybe_show_dependency_notice' ) );
+		add_action( 'add_meta_boxes', array( __CLASS__, 'register_meta_box' ) );
+		add_action( 'wp_ajax_pot_translate_post', array( __CLASS__, 'ajax_translate_post' ) );
+	}
+
+	public static function register_settings(): void {
+		register_setting(
+			'pot_openai_translator',
+			self::OPTION_KEY,
+			array(
+				'type'              => 'array',
+				'sanitize_callback' => array( __CLASS__, 'sanitize_options' ),
+				'default'           => self::default_options(),
+			)
+		);
+	}
+
+	public static function register_settings_page(): void {
+		add_options_page(
+			__( 'Polylang OpenAI Translator', 'polylang-openai-translator' ),
+			__( 'Polylang OpenAI Translator', 'polylang-openai-translator' ),
+			'manage_options',
+			'pot-openai-translator',
+			array( __CLASS__, 'render_settings_page' )
+		);
+	}
+
+	public static function maybe_show_dependency_notice(): void {
+		if ( self::has_polylang() ) {
+			return;
+		}
+
+		echo '<div class="notice notice-error"><p>';
+		echo esc_html__( 'Polylang OpenAI Translator requires Polylang to be installed and activated.', 'polylang-openai-translator' );
+		echo '</p></div>';
+	}
+
+	public static function register_meta_box(): void {
+		if ( ! self::has_polylang() ) {
+			return;
+		}
+
+		$post_types = get_post_types( array( 'public' => true ), 'names' );
+		foreach ( $post_types as $post_type ) {
+			if ( function_exists( 'pll_is_translated_post_type' ) && ! pll_is_translated_post_type( $post_type ) ) {
+				continue;
+			}
+
+			add_meta_box(
+				'pot-openai-translator',
+				__( 'OpenAI Translation', 'polylang-openai-translator' ),
+				array( __CLASS__, 'render_meta_box' ),
+				$post_type,
+				'side',
+				'default'
+			);
+		}
+	}
+
+	public static function render_settings_page(): void {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+
+		$options = self::get_options();
+		?>
+		<div class="wrap">
+			<h1><?php esc_html_e( 'Polylang OpenAI Translator', 'polylang-openai-translator' ); ?></h1>
+			<form method="post" action="options.php">
+				<?php settings_fields( 'pot_openai_translator' ); ?>
+				<table class="form-table" role="presentation">
+					<tr>
+						<th scope="row"><label for="pot-api-key"><?php esc_html_e( 'OpenAI API Key', 'polylang-openai-translator' ); ?></label></th>
+						<td>
+							<input id="pot-api-key" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[api_key]" type="password" class="regular-text" value="<?php echo esc_attr( $options['api_key'] ); ?>" autocomplete="off" />
+							<p class="description"><?php esc_html_e( 'Stored on this WordPress site and used only for server-side requests.', 'polylang-openai-translator' ); ?></p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="pot-model"><?php esc_html_e( 'Model', 'polylang-openai-translator' ); ?></label></th>
+						<td>
+							<input id="pot-model" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[model]" type="text" class="regular-text" value="<?php echo esc_attr( $options['model'] ); ?>" />
+							<p class="description"><?php esc_html_e( 'Use the model name required by your API provider.', 'polylang-openai-translator' ); ?></p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="pot-api-endpoint"><?php esc_html_e( 'API Endpoint', 'polylang-openai-translator' ); ?></label></th>
+						<td>
+							<input id="pot-api-endpoint" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[api_endpoint]" type="url" class="regular-text" value="<?php echo esc_attr( $options['api_endpoint'] ); ?>" />
+							<p class="description"><?php esc_html_e( 'For OpenAI-compatible providers, enter the full endpoint URL, for example https://example.com/v1/chat/completions.', 'polylang-openai-translator' ); ?></p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="pot-api-format"><?php esc_html_e( 'API Format', 'polylang-openai-translator' ); ?></label></th>
+						<td>
+							<select id="pot-api-format" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[api_format]">
+								<option value="responses" <?php selected( $options['api_format'], 'responses' ); ?>><?php esc_html_e( 'Responses API (/v1/responses)', 'polylang-openai-translator' ); ?></option>
+								<option value="chat_completions" <?php selected( $options['api_format'], 'chat_completions' ); ?>><?php esc_html_e( 'Chat Completions (/v1/chat/completions)', 'polylang-openai-translator' ); ?></option>
+							</select>
+							<p class="description"><?php esc_html_e( 'Most OpenAI-compatible services support Chat Completions.', 'polylang-openai-translator' ); ?></p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="pot-max-output-tokens"><?php esc_html_e( 'Max output tokens', 'polylang-openai-translator' ); ?></label></th>
+						<td>
+							<input id="pot-max-output-tokens" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[max_output_tokens]" type="number" min="1000" max="50000" step="500" value="<?php echo esc_attr( (string) $options['max_output_tokens'] ); ?>" />
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="pot-custom-instructions"><?php esc_html_e( 'Translation instructions', 'polylang-openai-translator' ); ?></label></th>
+						<td>
+							<textarea id="pot-custom-instructions" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[custom_instructions]" rows="6" class="large-text"><?php echo esc_textarea( $options['custom_instructions'] ); ?></textarea>
+						</td>
+					</tr>
+				</table>
+				<?php submit_button(); ?>
+			</form>
+		</div>
+		<?php
+	}
+
+	public static function render_meta_box( WP_Post $post ): void {
+		if ( ! self::has_polylang() ) {
+			echo esc_html__( 'Polylang is not active.', 'polylang-openai-translator' );
+			return;
+		}
+
+		$options = self::get_options();
+		if ( empty( $options['api_key'] ) ) {
+			printf(
+				'<p>%s <a href="%s">%s</a></p>',
+				esc_html__( 'Add your OpenAI API key before translating.', 'polylang-openai-translator' ),
+				esc_url( admin_url( 'options-general.php?page=pot-openai-translator' ) ),
+				esc_html__( 'Open settings', 'polylang-openai-translator' )
+			);
+			return;
+		}
+
+		$current_lang = function_exists( 'pll_get_post_language' ) ? pll_get_post_language( $post->ID, 'slug' ) : '';
+		$names        = function_exists( 'pll_languages_list' ) ? pll_languages_list( array( 'fields' => 'name' ) ) : array();
+		$slugs        = function_exists( 'pll_languages_list' ) ? pll_languages_list( array( 'fields' => 'slug' ) ) : array();
+		$translations = function_exists( 'pll_get_post_translations' ) ? pll_get_post_translations( $post->ID ) : array();
+		$nonce        = wp_create_nonce( self::NONCE_ACTION . '_' . $post->ID );
+
+		if ( empty( $slugs ) ) {
+			echo '<p>' . esc_html__( 'No Polylang languages found.', 'polylang-openai-translator' ) . '</p>';
+			return;
+		}
+		?>
+		<p>
+			<label for="pot-target-lang"><?php esc_html_e( 'Target language', 'polylang-openai-translator' ); ?></label>
+			<select id="pot-target-lang" class="widefat">
+				<?php foreach ( $slugs as $index => $slug ) : ?>
+					<?php if ( $slug === $current_lang ) : ?>
+						<?php continue; ?>
+					<?php endif; ?>
+					<option value="<?php echo esc_attr( $slug ); ?>">
+						<?php
+						$name   = $names[ $index ] ?? $slug;
+						$status = ! empty( $translations[ $slug ] ) ? __( 'update', 'polylang-openai-translator' ) : __( 'create', 'polylang-openai-translator' );
+						echo esc_html( sprintf( '%s (%s)', $name, $status ) );
+						?>
+					</option>
+				<?php endforeach; ?>
+			</select>
+		</p>
+		<p>
+			<button type="button" class="button button-primary widefat" id="pot-translate-button">
+				<?php esc_html_e( 'Translate with OpenAI', 'polylang-openai-translator' ); ?>
+			</button>
+		</p>
+		<p id="pot-translate-status" style="min-height:20px;"></p>
+		<script>
+			(function () {
+				const button = document.getElementById('pot-translate-button');
+				const target = document.getElementById('pot-target-lang');
+				const status = document.getElementById('pot-translate-status');
+				if (!button || !target || !status) {
+					return;
+				}
+
+				button.addEventListener('click', async function () {
+					button.disabled = true;
+					status.textContent = '<?php echo esc_js( __( 'Translating...', 'polylang-openai-translator' ) ); ?>';
+
+					const body = new URLSearchParams();
+					body.set('action', 'pot_translate_post');
+					body.set('nonce', '<?php echo esc_js( $nonce ); ?>');
+					body.set('post_id', '<?php echo esc_js( (string) $post->ID ); ?>');
+					body.set('target_lang', target.value);
+
+					try {
+						const response = await fetch(ajaxurl, {
+							method: 'POST',
+							credentials: 'same-origin',
+							headers: {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
+							body: body.toString()
+						});
+						const payload = await response.json();
+						if (!payload.success) {
+							throw new Error(payload.data && payload.data.message ? payload.data.message : '<?php echo esc_js( __( 'Translation failed.', 'polylang-openai-translator' ) ); ?>');
+						}
+
+						status.innerHTML = '<a href="' + payload.data.edit_url + '">' + payload.data.message + '</a>';
+					} catch (error) {
+						status.textContent = error.message;
+					} finally {
+						button.disabled = false;
+					}
+				});
+			})();
+		</script>
+		<?php
+	}
+
+	public static function ajax_translate_post(): void {
+		$post_id = isset( $_POST['post_id'] ) ? absint( $_POST['post_id'] ) : 0;
+		if ( ! $post_id || ! check_ajax_referer( self::NONCE_ACTION . '_' . $post_id, 'nonce', false ) ) {
+			wp_send_json_error( array( 'message' => __( 'Security check failed.', 'polylang-openai-translator' ) ), 403 );
+		}
+
+		if ( ! current_user_can( 'edit_post', $post_id ) ) {
+			wp_send_json_error( array( 'message' => __( 'You cannot edit this post.', 'polylang-openai-translator' ) ), 403 );
+		}
+
+		if ( ! self::has_polylang() ) {
+			wp_send_json_error( array( 'message' => __( 'Polylang is not active.', 'polylang-openai-translator' ) ), 400 );
+		}
+
+		$target_lang = isset( $_POST['target_lang'] ) ? sanitize_key( wp_unslash( $_POST['target_lang'] ) ) : '';
+		$result      = self::translate_post( $post_id, $target_lang );
+
+		if ( is_wp_error( $result ) ) {
+			wp_send_json_error( array( 'message' => $result->get_error_message() ), 400 );
+		}
+
+		wp_send_json_success(
+			array(
+				'message' => __( 'Translation is ready. Open translated post.', 'polylang-openai-translator' ),
+				'post_id'  => $result,
+				'edit_url' => get_edit_post_link( $result, 'raw' ),
+			)
+		);
+	}
+
+	private static function translate_post( int $post_id, string $target_lang ) {
+		$post = get_post( $post_id );
+		if ( ! $post ) {
+			return new WP_Error( 'pot_missing_post', __( 'Source post not found.', 'polylang-openai-translator' ) );
+		}
+
+		$available_langs = pll_languages_list( array( 'fields' => 'slug' ) );
+		if ( ! in_array( $target_lang, $available_langs, true ) ) {
+			return new WP_Error( 'pot_bad_language', __( 'Target language is not configured in Polylang.', 'polylang-openai-translator' ) );
+		}
+
+		$source_lang = pll_get_post_language( $post_id, 'slug' );
+		if ( empty( $source_lang ) && function_exists( 'pll_default_language' ) ) {
+			$source_lang = pll_default_language( 'slug' );
+			pll_set_post_language( $post_id, $source_lang );
+		}
+
+		if ( empty( $source_lang ) ) {
+			return new WP_Error( 'pot_missing_source_language', __( 'Source post language is not set in Polylang.', 'polylang-openai-translator' ) );
+		}
+
+		if ( $source_lang === $target_lang ) {
+			return new WP_Error( 'pot_same_language', __( 'Target language is the same as the source language.', 'polylang-openai-translator' ) );
+		}
+
+		$translation = self::request_translation( $post, $source_lang, $target_lang );
+		if ( is_wp_error( $translation ) ) {
+			return $translation;
+		}
+
+		$translations    = pll_get_post_translations( $post_id );
+		$translated_id   = isset( $translations[ $target_lang ] ) ? absint( $translations[ $target_lang ] ) : 0;
+		$translated_post = $translated_id ? get_post( $translated_id ) : null;
+		$postarr         = array(
+			'post_title'   => $translation['title'],
+			'post_content' => $translation['content'],
+			'post_excerpt' => $translation['excerpt'],
+			'post_status'  => 'draft',
+			'post_type'    => $post->post_type,
+			'post_author'  => $post->post_author,
+		);
+
+		if ( 'page' === $post->post_type ) {
+			$postarr['menu_order'] = $post->menu_order;
+			$postarr['post_parent'] = self::get_translated_parent_id( $post, $target_lang );
+		}
+
+		if ( $translated_post ) {
+			$postarr['ID']          = $translated_id;
+			$postarr['post_status'] = $translated_post->post_status;
+			$saved_id              = wp_update_post( wp_slash( $postarr ), true );
+		} else {
+			$postarr['post_name'] = sanitize_title( $translation['title'] );
+			$saved_id            = wp_insert_post( wp_slash( $postarr ), true );
+		}
+
+		if ( is_wp_error( $saved_id ) ) {
+			return $saved_id;
+		}
+
+		pll_set_post_language( $saved_id, $target_lang );
+		self::copy_post_context( $post_id, $saved_id, $target_lang );
+		$builder_result = self::translate_builder_content( $post_id, $saved_id, $source_lang, $target_lang );
+		if ( is_wp_error( $builder_result ) ) {
+			return $builder_result;
+		}
+
+		$translations[ $source_lang ] = $post_id;
+		$translations[ $target_lang ] = $saved_id;
+		pll_save_post_translations( array_filter( $translations ) );
+
+		return $saved_id;
+	}
+
+	private static function request_translation( WP_Post $post, string $source_lang, string $target_lang ) {
+		$options = self::get_options();
+		if ( empty( $options['api_key'] ) ) {
+			return new WP_Error( 'pot_missing_api_key', __( 'OpenAI API key is missing.', 'polylang-openai-translator' ) );
+		}
+
+		$payload = array(
+			'title'   => get_the_title( $post ),
+			'excerpt' => $post->post_excerpt,
+			'content' => $post->post_content,
+		);
+
+		$instructions = self::build_instructions( $source_lang, $target_lang, $options['custom_instructions'] );
+		$input_json   = wp_json_encode( $payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES );
+		$body         = self::build_api_body( $options, $instructions, $input_json );
+
+		$response = wp_remote_post(
+			self::normalize_api_endpoint( $options['api_endpoint'], $options['api_format'] ),
+			array(
+				'timeout' => 120,
+				'headers' => array(
+					'Authorization' => 'Bearer ' . $options['api_key'],
+					'Content-Type'  => 'application/json',
+				),
+				'body'    => wp_json_encode( $body ),
+			)
+		);
+
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+
+		$status_code = wp_remote_retrieve_response_code( $response );
+		$raw_body    = wp_remote_retrieve_body( $response );
+		$decoded     = json_decode( $raw_body, true );
+
+		if ( $status_code < 200 || $status_code >= 300 ) {
+			$message = $decoded['error']['message'] ?? sprintf( __( 'OpenAI request failed with HTTP %d.', 'polylang-openai-translator' ), $status_code );
+			return new WP_Error( 'pot_openai_error', $message );
+		}
+
+		$output_text = self::extract_api_response_text( is_array( $decoded ) ? $decoded : array(), $options['api_format'] );
+		$translation = self::decode_translation_json( $output_text );
+		if ( is_wp_error( $translation ) ) {
+			return $translation;
+		}
+
+		return array(
+			'title'   => sanitize_text_field( $translation['title'] ?? '' ),
+			'excerpt' => (string) ( $translation['excerpt'] ?? '' ),
+			'content' => (string) ( $translation['content'] ?? '' ),
+		);
+	}
+
+	private static function translate_builder_content( int $source_id, int $target_id, string $source_lang, string $target_lang ) {
+		$elementor_result = self::translate_elementor_data( $source_id, $target_id, $source_lang, $target_lang );
+		if ( is_wp_error( $elementor_result ) ) {
+			return $elementor_result;
+		}
+
+		return true;
+	}
+
+	private static function translate_elementor_data( int $source_id, int $target_id, string $source_lang, string $target_lang ) {
+		$raw_data = get_post_meta( $source_id, '_elementor_data', true );
+		if ( '' === $raw_data || null === $raw_data ) {
+			return true;
+		}
+
+		$data = json_decode( (string) $raw_data, true );
+		if ( ! is_array( $data ) ) {
+			return new WP_Error( 'pot_bad_elementor_json', __( 'Elementor data exists but is not valid JSON.', 'polylang-openai-translator' ) );
+		}
+
+		$strings = array();
+		self::collect_builder_strings( $data, $strings );
+
+		if ( empty( $strings ) ) {
+			update_post_meta( $target_id, '_elementor_data', wp_slash( (string) $raw_data ) );
+			return true;
+		}
+
+		$translated_strings = self::request_string_map_translation( $strings, $source_lang, $target_lang );
+		if ( is_wp_error( $translated_strings ) ) {
+			return $translated_strings;
+		}
+
+		self::apply_builder_strings( $data, $translated_strings );
+		update_post_meta( $target_id, '_elementor_data', wp_slash( wp_json_encode( $data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ) ) );
+
+		return true;
+	}
+
+	private static function collect_builder_strings( &$node, array &$strings, string $key = '' ): void {
+		if ( is_array( $node ) ) {
+			foreach ( $node as $child_key => &$child ) {
+				self::collect_builder_strings( $child, $strings, (string) $child_key );
+			}
+			return;
+		}
+
+		if ( ! is_string( $node ) || ! self::is_translatable_builder_string( $key, $node ) ) {
+			return;
+		}
+
+		$id             = 's' . ( count( $strings ) + 1 );
+		$strings[ $id ] = $node;
+		$node           = '{{' . $id . '}}';
+	}
+
+	private static function apply_builder_strings( &$node, array $translated_strings ): void {
+		if ( is_array( $node ) ) {
+			foreach ( $node as &$child ) {
+				self::apply_builder_strings( $child, $translated_strings );
+			}
+			return;
+		}
+
+		if ( is_string( $node ) && preg_match( '/^\{\{(s\d+)\}\}$/', $node, $matches ) ) {
+			$node = isset( $translated_strings[ $matches[1] ] ) ? (string) $translated_strings[ $matches[1] ] : '';
+		}
+	}
+
+	private static function is_translatable_builder_string( string $key, string $value ): bool {
+		$value = trim( $value );
+		if ( '' === $value ) {
+			return false;
+		}
+
+		if ( strlen( $value ) > 12000 ) {
+			return false;
+		}
+
+		if ( preg_match( '#^(https?:)?//#i', $value ) || preg_match( '#^[\w./:-]+\.(jpg|jpeg|png|gif|webp|svg|mp4|webm|pdf|zip)$#i', $value ) ) {
+			return false;
+		}
+
+		if ( preg_match( '/^#[0-9a-f]{3,8}$/i', $value ) ) {
+			return false;
+		}
+
+		$allowed_keys = array(
+			'title',
+			'editor',
+			'text',
+			'description',
+			'caption',
+			'placeholder',
+			'label',
+			'content',
+			'button_text',
+			'link_text',
+			'tab_title',
+			'tab_content',
+			'item_title',
+			'item_description',
+			'html',
+		);
+
+		return in_array( $key, $allowed_keys, true ) || (bool) preg_match( '/(_title|_text|_content|_description|_caption|_label|_placeholder)$/', $key );
+	}
+
+	private static function request_string_map_translation( array $strings, string $source_lang, string $target_lang ) {
+		$chunks      = array();
+		$chunk       = array();
+		$chunk_chars = 0;
+		foreach ( $strings as $key => $value ) {
+			$value_chars = strlen( (string) $value );
+			if ( $chunk && ( count( $chunk ) >= 40 || $chunk_chars + $value_chars > 16000 ) ) {
+				$chunks[]    = $chunk;
+				$chunk       = array();
+				$chunk_chars = 0;
+			}
+
+			$chunk[ $key ] = $value;
+			$chunk_chars  += $value_chars;
+		}
+
+		if ( $chunk ) {
+			$chunks[] = $chunk;
+		}
+
+		$translated = array();
+		foreach ( $chunks as $chunk ) {
+			$result = self::request_string_map_translation_chunk( $chunk, $source_lang, $target_lang );
+			if ( is_wp_error( $result ) ) {
+				return $result;
+			}
+
+			$translated = array_merge( $translated, $result );
+		}
+
+		return $translated;
+	}
+
+	private static function request_string_map_translation_chunk( array $strings, string $source_lang, string $target_lang ) {
+		$options = self::get_options();
+		if ( empty( $options['api_key'] ) ) {
+			return new WP_Error( 'pot_missing_api_key', __( 'OpenAI API key is missing.', 'polylang-openai-translator' ) );
+		}
+
+		$instructions = sprintf(
+			'Translate each JSON value from %s to %s. Preserve all HTML tags, attributes, shortcodes, URLs, variables, icon names, product codes, line breaks, and whitespace shape. Return only a valid JSON object with exactly the same keys. Translate visible human-readable text only.',
+			$source_lang,
+			$target_lang
+		);
+
+		if ( '' !== trim( $options['custom_instructions'] ) ) {
+			$instructions .= "\n\nSite-specific instructions:\n" . trim( $options['custom_instructions'] );
+		}
+
+		$body = self::build_api_body(
+			$options,
+			$instructions,
+			wp_json_encode( $strings, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES )
+		);
+
+		$response = wp_remote_post(
+			self::normalize_api_endpoint( $options['api_endpoint'], $options['api_format'] ),
+			array(
+				'timeout' => 180,
+				'headers' => array(
+					'Authorization' => 'Bearer ' . $options['api_key'],
+					'Content-Type'  => 'application/json',
+				),
+				'body'    => wp_json_encode( $body ),
+			)
+		);
+
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+
+		$status_code = wp_remote_retrieve_response_code( $response );
+		$raw_body    = wp_remote_retrieve_body( $response );
+		$decoded     = json_decode( $raw_body, true );
+
+		if ( $status_code < 200 || $status_code >= 300 ) {
+			$message = $decoded['error']['message'] ?? sprintf( __( 'OpenAI request failed with HTTP %d.', 'polylang-openai-translator' ), $status_code );
+			return new WP_Error( 'pot_openai_error', $message );
+		}
+
+		$output_text = self::extract_api_response_text( is_array( $decoded ) ? $decoded : array(), $options['api_format'] );
+		$translated  = self::decode_json_object( $output_text );
+		if ( is_wp_error( $translated ) ) {
+			return $translated;
+		}
+
+		return $translated;
+	}
+
+	private static function build_instructions( string $source_lang, string $target_lang, string $custom_instructions ): string {
+		$base = sprintf(
+			'Translate WordPress post JSON from %s to %s. Keep HTML, Gutenberg block comments, shortcodes, URLs, product codes, and placeholders intact. Translate visible human-readable text only. Return only valid JSON with exactly these string keys: title, excerpt, content.',
+			$source_lang,
+			$target_lang
+		);
+
+		if ( '' !== trim( $custom_instructions ) ) {
+			$base .= "\n\nSite-specific instructions:\n" . trim( $custom_instructions );
+		}
+
+		return $base;
+	}
+
+	private static function build_api_body( array $options, string $instructions, string $input_json ): array {
+		if ( 'chat_completions' === $options['api_format'] ) {
+			return array(
+				'model'       => $options['model'],
+				'messages'    => array(
+					array(
+						'role'    => 'system',
+						'content' => $instructions,
+					),
+					array(
+						'role'    => 'user',
+						'content' => $input_json,
+					),
+				),
+				'temperature' => 0.2,
+				'max_tokens'  => (int) $options['max_output_tokens'],
+			);
+		}
+
+		return array(
+			'model'             => $options['model'],
+			'instructions'      => $instructions,
+			'input'             => $input_json,
+			'max_output_tokens' => (int) $options['max_output_tokens'],
+		);
+	}
+
+	private static function normalize_api_endpoint( string $endpoint, string $api_format ): string {
+		$endpoint = rtrim( trim( $endpoint ), '/' );
+
+		if ( '' === $endpoint ) {
+			$endpoint = 'https://api.openai.com/v1';
+		}
+
+		if ( preg_match( '#/(responses|chat/completions)$#', $endpoint ) ) {
+			return $endpoint;
+		}
+
+		if ( 'chat_completions' === $api_format ) {
+			return $endpoint . '/chat/completions';
+		}
+
+		return $endpoint . '/responses';
+	}
+
+	private static function extract_api_response_text( array $decoded, string $api_format ): string {
+		if ( 'chat_completions' === $api_format ) {
+			return (string) ( $decoded['choices'][0]['message']['content'] ?? '' );
+		}
+
+		return self::extract_response_text( $decoded );
+	}
+
+	private static function extract_response_text( array $decoded ): string {
+		if ( isset( $decoded['output_text'] ) && is_string( $decoded['output_text'] ) ) {
+			return $decoded['output_text'];
+		}
+
+		$text = '';
+		foreach ( $decoded['output'] ?? array() as $item ) {
+			foreach ( $item['content'] ?? array() as $content ) {
+				if ( isset( $content['text'] ) && is_string( $content['text'] ) ) {
+					$text .= $content['text'];
+				}
+			}
+		}
+
+		return $text;
+	}
+
+	private static function decode_translation_json( string $output_text ) {
+		$decoded = self::decode_json_object( $output_text );
+		if ( is_wp_error( $decoded ) ) {
+			return $decoded;
+		}
+
+		if ( ! is_array( $decoded ) || ! isset( $decoded['title'], $decoded['content'] ) ) {
+			return new WP_Error( 'pot_bad_openai_json', __( 'OpenAI did not return the expected translation JSON.', 'polylang-openai-translator' ) );
+		}
+
+		return $decoded;
+	}
+
+	private static function decode_json_object( string $output_text ) {
+		$output_text = trim( $output_text );
+		$decoded     = json_decode( $output_text, true );
+
+		if ( ! is_array( $decoded ) ) {
+			if ( preg_match( '/```(?:json)?\s*(\{.*\})\s*```/s', $output_text, $matches ) ) {
+				$decoded = json_decode( $matches[1], true );
+			} elseif ( preg_match( '/\{.*\}/s', $output_text, $matches ) ) {
+				$decoded = json_decode( $matches[0], true );
+			}
+		}
+
+		if ( ! is_array( $decoded ) ) {
+			return new WP_Error( 'pot_bad_openai_json', __( 'OpenAI did not return valid JSON.', 'polylang-openai-translator' ) );
+		}
+
+		return $decoded;
+	}
+
+	private static function copy_post_context( int $source_id, int $target_id, string $target_lang ): void {
+		$thumbnail_id = get_post_thumbnail_id( $source_id );
+		if ( $thumbnail_id ) {
+			set_post_thumbnail( $target_id, $thumbnail_id );
+		}
+
+		$template = get_page_template_slug( $source_id );
+		if ( $template ) {
+			update_post_meta( $target_id, '_wp_page_template', $template );
+		}
+
+		self::copy_elementor_support_meta( $source_id, $target_id );
+
+		self::copy_terms( $source_id, $target_id, $target_lang );
+
+		$meta_keys = apply_filters(
+			'pot_openai_translator_copy_meta_keys',
+			array(),
+			$source_id,
+			$target_id,
+			$target_lang
+		);
+
+		foreach ( array_unique( array_filter( array_map( 'sanitize_key', (array) $meta_keys ) ) ) as $meta_key ) {
+			$values = get_post_meta( $source_id, $meta_key, false );
+			delete_post_meta( $target_id, $meta_key );
+			foreach ( $values as $value ) {
+				add_post_meta( $target_id, $meta_key, maybe_unserialize( $value ) );
+			}
+		}
+	}
+
+	private static function copy_elementor_support_meta( int $source_id, int $target_id ): void {
+		$meta_keys = array(
+			'_elementor_edit_mode',
+			'_elementor_template_type',
+			'_elementor_version',
+			'_elementor_page_settings',
+			'_elementor_pro_version',
+		);
+
+		foreach ( $meta_keys as $meta_key ) {
+			$value = get_post_meta( $source_id, $meta_key, true );
+			if ( '' !== $value && null !== $value ) {
+				update_post_meta( $target_id, $meta_key, maybe_unserialize( $value ) );
+			}
+		}
+
+		delete_post_meta( $target_id, '_elementor_css' );
+	}
+
+	private static function copy_terms( int $source_id, int $target_id, string $target_lang ): void {
+		$taxonomies = get_object_taxonomies( get_post_type( $source_id ), 'objects' );
+		foreach ( $taxonomies as $taxonomy ) {
+			if ( ! $taxonomy->public ) {
+				continue;
+			}
+
+			$term_ids = wp_get_object_terms( $source_id, $taxonomy->name, array( 'fields' => 'ids' ) );
+			if ( is_wp_error( $term_ids ) || empty( $term_ids ) ) {
+				continue;
+			}
+
+			$target_terms = array();
+			foreach ( $term_ids as $term_id ) {
+				$target_term_id = $term_id;
+				if ( function_exists( 'pll_is_translated_taxonomy' ) && pll_is_translated_taxonomy( $taxonomy->name ) && function_exists( 'pll_get_term' ) ) {
+					$target_term_id = pll_get_term( $term_id, $target_lang );
+				}
+				if ( $target_term_id ) {
+					$target_terms[] = (int) $target_term_id;
+				}
+			}
+
+			if ( $target_terms ) {
+				wp_set_object_terms( $target_id, $target_terms, $taxonomy->name, false );
+			}
+		}
+	}
+
+	private static function get_translated_parent_id( WP_Post $post, string $target_lang ): int {
+		if ( ! $post->post_parent || ! function_exists( 'pll_get_post' ) ) {
+			return 0;
+		}
+
+		return (int) pll_get_post( $post->post_parent, $target_lang );
+	}
+
+	public static function sanitize_options( $input ): array {
+		$defaults = self::default_options();
+		$input    = is_array( $input ) ? $input : array();
+
+		return array(
+			'api_key'             => isset( $input['api_key'] ) ? sanitize_text_field( $input['api_key'] ) : '',
+			'model'               => isset( $input['model'] ) ? sanitize_text_field( $input['model'] ) : $defaults['model'],
+			'api_endpoint'        => ! empty( $input['api_endpoint'] ) ? esc_url_raw( $input['api_endpoint'] ) : $defaults['api_endpoint'],
+			'api_format'          => isset( $input['api_format'] ) && in_array( $input['api_format'], array( 'responses', 'chat_completions' ), true ) ? $input['api_format'] : $defaults['api_format'],
+			'max_output_tokens'   => isset( $input['max_output_tokens'] ) ? max( 1000, min( 50000, absint( $input['max_output_tokens'] ) ) ) : $defaults['max_output_tokens'],
+			'custom_instructions' => isset( $input['custom_instructions'] ) ? sanitize_textarea_field( $input['custom_instructions'] ) : '',
+		);
+	}
+
+	private static function get_options(): array {
+		return wp_parse_args( get_option( self::OPTION_KEY, array() ), self::default_options() );
+	}
+
+	private static function default_options(): array {
+		return array(
+			'api_key'             => '',
+			'model'               => 'gpt-5.2',
+			'api_endpoint'        => 'https://api.openai.com/v1/responses',
+			'api_format'          => 'responses',
+			'max_output_tokens'   => 12000,
+			'custom_instructions' => 'Use natural, business-ready wording. Preserve technical terms when translating them would reduce accuracy.',
+		);
+	}
+
+	private static function has_polylang(): bool {
+		return function_exists( 'pll_languages_list' )
+			&& function_exists( 'pll_get_post_language' )
+			&& function_exists( 'pll_set_post_language' )
+			&& function_exists( 'pll_get_post_translations' )
+			&& function_exists( 'pll_save_post_translations' );
+	}
+}
+
+POT_Polylang_OpenAI_Translator::boot();
