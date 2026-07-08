@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Polylang OpenAI Translator
  * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
- * Version: 0.1.4
+ * Version: 0.1.5
  * Author: Codex
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -362,10 +362,12 @@ final class POT_Polylang_OpenAI_Translator {
 		$input_json   = wp_json_encode( $payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES );
 		$body         = self::build_api_body( $options, $instructions, $input_json );
 
+		self::enable_http11_for_next_request();
 		$response = wp_remote_post(
 			self::normalize_api_endpoint( $options['api_endpoint'], $options['api_format'] ),
 			array(
 				'timeout' => (int) $options['request_timeout'],
+				'httpversion' => '1.1',
 				'headers' => array(
 					'Authorization' => 'Bearer ' . $options['api_key'],
 					'Content-Type'  => 'application/json',
@@ -373,6 +375,7 @@ final class POT_Polylang_OpenAI_Translator {
 				'body'    => wp_json_encode( $body ),
 			)
 		);
+		self::disable_http11_for_next_request();
 
 		if ( is_wp_error( $response ) ) {
 			return $response;
@@ -563,10 +566,12 @@ final class POT_Polylang_OpenAI_Translator {
 			wp_json_encode( $strings, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES )
 		);
 
+		self::enable_http11_for_next_request();
 		$response = wp_remote_post(
 			self::normalize_api_endpoint( $options['api_endpoint'], $options['api_format'] ),
 			array(
 				'timeout' => (int) $options['request_timeout'],
+				'httpversion' => '1.1',
 				'headers' => array(
 					'Authorization' => 'Bearer ' . $options['api_key'],
 					'Content-Type'  => 'application/json',
@@ -574,6 +579,7 @@ final class POT_Polylang_OpenAI_Translator {
 				'body'    => wp_json_encode( $body ),
 			)
 		);
+		self::disable_http11_for_next_request();
 
 		if ( is_wp_error( $response ) ) {
 			return $response;
@@ -636,6 +642,20 @@ final class POT_Polylang_OpenAI_Translator {
 			'input'             => $input_json,
 			'max_output_tokens' => (int) $options['max_output_tokens'],
 		);
+	}
+
+	private static function enable_http11_for_next_request(): void {
+		add_action( 'http_api_curl', array( __CLASS__, 'force_curl_http11' ) );
+	}
+
+	private static function disable_http11_for_next_request(): void {
+		remove_action( 'http_api_curl', array( __CLASS__, 'force_curl_http11' ) );
+	}
+
+	public static function force_curl_http11( $handle ): void {
+		if ( defined( 'CURLOPT_HTTP_VERSION' ) && defined( 'CURL_HTTP_VERSION_1_1' ) ) {
+			curl_setopt( $handle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1 );
+		}
 	}
 
 	private static function normalize_api_endpoint( string $endpoint, string $api_format ): string {
