@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Polylang OpenAI Translator
  * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
- * Version: 0.1.7
+ * Version: 0.1.8
  * Author: Codex
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -458,6 +458,11 @@ final class POT_Polylang_OpenAI_Translator {
 			return new WP_Error( 'pot_bad_elementor_json', __( 'Elementor data exists but is not valid JSON.', 'polylang-openai-translator' ) );
 		}
 
+		$media_result = self::translate_elementor_media_references( $data, $source_lang, $target_lang );
+		if ( is_wp_error( $media_result ) ) {
+			return $media_result;
+		}
+
 		$strings = array();
 		self::collect_builder_strings( $data, $strings );
 
@@ -492,6 +497,39 @@ final class POT_Polylang_OpenAI_Translator {
 		$id             = 's' . ( count( $strings ) + 1 );
 		$strings[ $id ] = $node;
 		$node           = '{{' . $id . '}}';
+	}
+
+	private static function translate_elementor_media_references( &$node, string $source_lang, string $target_lang ) {
+		if ( ! is_array( $node ) ) {
+			return true;
+		}
+
+		if ( isset( $node['id'] ) && is_numeric( $node['id'] ) && self::looks_like_elementor_media_array( $node ) ) {
+			$translated_id = self::translate_media_attachment( (int) $node['id'], $source_lang, $target_lang );
+			if ( is_wp_error( $translated_id ) ) {
+				return $translated_id;
+			}
+			if ( $translated_id ) {
+				$node['id'] = $translated_id;
+			}
+		}
+
+		foreach ( $node as &$child ) {
+			$result = self::translate_elementor_media_references( $child, $source_lang, $target_lang );
+			if ( is_wp_error( $result ) ) {
+				return $result;
+			}
+		}
+
+		return true;
+	}
+
+	private static function looks_like_elementor_media_array( array $node ): bool {
+		return isset( $node['url'] )
+			|| isset( $node['source'] )
+			|| isset( $node['alt'] )
+			|| isset( $node['size'] )
+			|| isset( $node['library'] );
 	}
 
 	private static function apply_builder_strings( &$node, array $translated_strings ): void {
@@ -531,6 +569,8 @@ final class POT_Polylang_OpenAI_Translator {
 			'text',
 			'description',
 			'caption',
+			'alt',
+			'image_alt',
 			'placeholder',
 			'label',
 			'content',
@@ -577,6 +617,34 @@ final class POT_Polylang_OpenAI_Translator {
 		}
 
 		return $translated;
+	}
+
+	private static function request_media_translation( WP_Post $attachment, string $source_lang, string $target_lang ) {
+		$payload = array(
+			'title'       => $attachment->post_title,
+			'alt'         => get_post_meta( $attachment->ID, '_wp_attachment_image_alt', true ),
+			'caption'     => $attachment->post_excerpt,
+			'description' => $attachment->post_content,
+		);
+
+		if ( '' === trim( implode( '', array_map( 'strval', $payload ) ) ) ) {
+			return $payload;
+		}
+
+		$result = self::request_string_map_translation( $payload, $source_lang, $target_lang );
+		if ( is_wp_error( $result ) ) {
+			return $result;
+		}
+
+		return wp_parse_args(
+			$result,
+			array(
+				'title'       => $payload['title'],
+				'alt'         => $payload['alt'],
+				'caption'     => $payload['caption'],
+				'description' => $payload['description'],
+			)
+		);
 	}
 
 	private static function request_string_map_translation_chunk( array $strings, string $source_lang, string $target_lang ) {
@@ -771,7 +839,12 @@ final class POT_Polylang_OpenAI_Translator {
 	private static function copy_post_context( int $source_id, int $target_id, string $target_lang ): void {
 		$thumbnail_id = get_post_thumbnail_id( $source_id );
 		if ( $thumbnail_id ) {
-			set_post_thumbnail( $target_id, $thumbnail_id );
+			$target_thumbnail_id = self::translate_media_attachment( $thumbnail_id, (string) pll_get_post_language( $source_id, 'slug' ), $target_lang );
+			if ( ! is_wp_error( $target_thumbnail_id ) && $target_thumbnail_id ) {
+				set_post_thumbnail( $target_id, $target_thumbnail_id );
+			} else {
+				set_post_thumbnail( $target_id, $thumbnail_id );
+			}
 		}
 
 		$template = get_page_template_slug( $source_id );
@@ -797,6 +870,109 @@ final class POT_Polylang_OpenAI_Translator {
 			foreach ( $values as $value ) {
 				add_post_meta( $target_id, $meta_key, maybe_unserialize( $value ) );
 			}
+		}
+	}
+
+	private static function translate_media_attachment( int $attachment_id, string $source_lang, string $target_lang ) {
+		static $cache = array();
+
+		if ( ! $attachment_id || 'attachment' !== get_post_type( $attachment_id ) ) {
+			return 0;
+		}
+
+		if ( function_exists( 'pll_is_translated_post_type' ) && ! pll_is_translated_post_type( 'attachment' ) ) {
+			return $attachment_id;
+		}
+
+		if ( $source_lang === $target_lang ) {
+			return $attachment_id;
+		}
+
+		if ( empty( $source_lang ) && function_exists( 'pll_default_language' ) ) {
+			$source_lang = (string) pll_default_language( 'slug' );
+		}
+
+		if ( empty( $source_lang ) ) {
+			return $attachment_id;
+		}
+
+		$cache_key = $attachment_id . ':' . $target_lang;
+		if ( isset( $cache[ $cache_key ] ) ) {
+			return $cache[ $cache_key ];
+		}
+
+		if ( function_exists( 'pll_get_post_language' ) ) {
+			$current_lang = pll_get_post_language( $attachment_id, 'slug' );
+			if ( empty( $current_lang ) && $source_lang && function_exists( 'pll_set_post_language' ) ) {
+				pll_set_post_language( $attachment_id, $source_lang );
+			}
+		}
+
+		$existing_id = function_exists( 'pll_get_post' ) ? (int) pll_get_post( $attachment_id, $target_lang ) : 0;
+		$source      = get_post( $attachment_id );
+		if ( ! $source ) {
+			return 0;
+		}
+
+		$translation = self::request_media_translation( $source, $source_lang, $target_lang );
+		if ( is_wp_error( $translation ) ) {
+			return $translation;
+		}
+
+		$attachment_data = array(
+			'post_title'     => sanitize_text_field( $translation['title'] ?? $source->post_title ),
+			'post_excerpt'   => (string) ( $translation['caption'] ?? $source->post_excerpt ),
+			'post_content'   => (string) ( $translation['description'] ?? $source->post_content ),
+			'post_mime_type' => $source->post_mime_type,
+			'post_status'    => 'inherit',
+			'post_type'      => 'attachment',
+			'post_author'    => $source->post_author,
+			'post_parent'    => 0,
+			'guid'           => $source->guid,
+		);
+
+		if ( $existing_id ) {
+			$attachment_data['ID'] = $existing_id;
+			$target_id             = wp_update_post( wp_slash( $attachment_data ), true );
+		} else {
+			$target_id = wp_insert_post( wp_slash( $attachment_data ), true );
+		}
+
+		if ( is_wp_error( $target_id ) ) {
+			return $target_id;
+		}
+
+		self::copy_attachment_file_meta( $attachment_id, (int) $target_id );
+
+		if ( isset( $translation['alt'] ) ) {
+			update_post_meta( (int) $target_id, '_wp_attachment_image_alt', sanitize_text_field( $translation['alt'] ) );
+		}
+
+		if ( function_exists( 'pll_set_post_language' ) ) {
+			pll_set_post_language( (int) $target_id, $target_lang );
+		}
+
+		if ( function_exists( 'pll_get_post_translations' ) && function_exists( 'pll_save_post_translations' ) ) {
+			$translations                  = pll_get_post_translations( $attachment_id );
+			$translations[ $source_lang ] = $attachment_id;
+			$translations[ $target_lang ] = (int) $target_id;
+			pll_save_post_translations( array_filter( $translations ) );
+		}
+
+		$cache[ $cache_key ] = (int) $target_id;
+
+		return (int) $target_id;
+	}
+
+	private static function copy_attachment_file_meta( int $source_id, int $target_id ): void {
+		$file = get_post_meta( $source_id, '_wp_attached_file', true );
+		if ( '' !== $file && null !== $file ) {
+			update_post_meta( $target_id, '_wp_attached_file', $file );
+		}
+
+		$metadata = wp_get_attachment_metadata( $source_id );
+		if ( $metadata ) {
+			wp_update_attachment_metadata( $target_id, $metadata );
 		}
 	}
 
