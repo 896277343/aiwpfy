@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Polylang OpenAI Translator
  * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
- * Version: 0.1.12
+ * Version: 0.1.13
  * Author: Codex
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -293,7 +293,7 @@ final class POT_Polylang_OpenAI_Translator {
 							for (let index = 0; index < options.length; index++) {
 								const item = options[index];
 								status.textContent = '<?php echo esc_js( __( 'Translating', 'polylang-openai-translator' ) ); ?> ' + (index + 1) + '/' + options.length + ': ' + item.label;
-								const payload = await translateLanguage(item.slug);
+								const payload = await translateLanguageWithRetry(item.slug, item.label, index + 1, options.length);
 								completed.push('<a href="' + payload.data.edit_url + '">' + item.label + '</a>');
 							}
 
@@ -359,6 +359,29 @@ final class POT_Polylang_OpenAI_Translator {
 					}
 
 					return payload;
+				}
+
+				async function translateLanguageWithRetry(language, label, index, total) {
+					let lastError;
+					for (let attempt = 1; attempt <= 2; attempt++) {
+						try {
+							if (attempt > 1) {
+								status.textContent = '<?php echo esc_js( __( 'Retrying', 'polylang-openai-translator' ) ); ?> ' + index + '/' + total + ': ' + label + ' (' + attempt + '/2)';
+								await wait(2000);
+							}
+							return await translateLanguage(language);
+						} catch (error) {
+							lastError = error;
+						}
+					}
+
+					throw lastError;
+				}
+
+				function wait(milliseconds) {
+					return new Promise(function (resolve) {
+						window.setTimeout(resolve, milliseconds);
+					});
 				}
 
 				async function publishTranslations() {
@@ -651,20 +674,7 @@ final class POT_Polylang_OpenAI_Translator {
 		$input_json   = wp_json_encode( $payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES );
 		$body         = self::build_api_body( $options, $instructions, $input_json );
 
-		self::enable_http11_for_next_request();
-		$response = wp_remote_post(
-			self::normalize_api_endpoint( $options['api_endpoint'], $options['api_format'] ),
-			array(
-				'timeout' => (int) $options['request_timeout'],
-				'httpversion' => '1.1',
-				'headers' => array(
-					'Authorization' => 'Bearer ' . $options['api_key'],
-					'Content-Type'  => 'application/json',
-				),
-				'body'    => wp_json_encode( $body ),
-			)
-		);
-		self::disable_http11_for_next_request();
+		$response = self::post_to_api( $options, $body );
 
 		if ( is_wp_error( $response ) ) {
 			return $response;
@@ -931,20 +941,7 @@ final class POT_Polylang_OpenAI_Translator {
 			wp_json_encode( $strings, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES )
 		);
 
-		self::enable_http11_for_next_request();
-		$response = wp_remote_post(
-			self::normalize_api_endpoint( $options['api_endpoint'], $options['api_format'] ),
-			array(
-				'timeout' => (int) $options['request_timeout'],
-				'httpversion' => '1.1',
-				'headers' => array(
-					'Authorization' => 'Bearer ' . $options['api_key'],
-					'Content-Type'  => 'application/json',
-				),
-				'body'    => wp_json_encode( $body ),
-			)
-		);
-		self::disable_http11_for_next_request();
+		$response = self::post_to_api( $options, $body );
 
 		if ( is_wp_error( $response ) ) {
 			return $response;
@@ -1007,6 +1004,51 @@ final class POT_Polylang_OpenAI_Translator {
 			'input'             => $input_json,
 			'max_output_tokens' => (int) $options['max_output_tokens'],
 		);
+	}
+
+	private static function post_to_api( array $options, array $body ) {
+		$endpoint = self::normalize_api_endpoint( $options['api_endpoint'], $options['api_format'] );
+		$args     = array(
+			'timeout'     => (int) $options['request_timeout'],
+			'httpversion' => '1.1',
+			'headers'     => array(
+				'Authorization' => 'Bearer ' . $options['api_key'],
+				'Content-Type'  => 'application/json',
+			),
+			'body'        => wp_json_encode( $body ),
+		);
+
+		$last_response = null;
+		for ( $attempt = 1; $attempt <= 3; $attempt++ ) {
+			self::enable_http11_for_next_request();
+			$response = wp_remote_post( $endpoint, $args );
+			self::disable_http11_for_next_request();
+
+			if ( ! is_wp_error( $response ) ) {
+				return $response;
+			}
+
+			$last_response = $response;
+			if ( ! self::is_retryable_http_error( $response ) || 3 === $attempt ) {
+				return $response;
+			}
+
+			sleep( $attempt );
+		}
+
+		return $last_response;
+	}
+
+	private static function is_retryable_http_error( WP_Error $error ): bool {
+		$message = strtolower( $error->get_error_message() );
+
+		return false !== strpos( $message, 'empty reply' )
+			|| false !== strpos( $message, 'timed out' )
+			|| false !== strpos( $message, 'operation timed out' )
+			|| false !== strpos( $message, 'stream error' )
+			|| false !== strpos( $message, 'internal_error' )
+			|| false !== strpos( $message, 'connection reset' )
+			|| false !== strpos( $message, 'remote end closed' );
 	}
 
 	private static function enable_http11_for_next_request(): void {
