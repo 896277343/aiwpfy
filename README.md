@@ -9,6 +9,7 @@ A small WordPress plugin that works alongside Polylang to translate posts, pages
 - Supports official OpenAI endpoints and OpenAI-compatible API providers.
 - Adds an `OpenAI Translation` box in the post editor.
 - Creates a draft translation for the selected target language, or updates the existing linked translation.
+- Can translate the current post to all configured target languages sequentially from the editor box.
 - Uses Polylang APIs to set the target language and link translations.
 - Preserves Gutenberg block comments, HTML, shortcodes, URLs, product codes, featured image, page template, and public taxonomy terms where possible.
 - Translates Elementor page content stored in `_elementor_data` while preserving Elementor sections, widgets, IDs, images, links, and style settings.
@@ -43,6 +44,8 @@ Examples:
 2. In the `OpenAI Translation` box, select a target language.
 3. Click `Translate with OpenAI`.
 4. Open the created draft translation, review it, then publish it.
+
+Use `Translate all languages` to translate the current post to every other Polylang language. The plugin runs one language at a time to avoid a single long request timing out.
 
 ## Notes
 

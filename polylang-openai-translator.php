@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Polylang OpenAI Translator
  * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
- * Version: 0.1.10
+ * Version: 0.1.11
  * Author: Codex
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -219,10 +219,16 @@ final class POT_Polylang_OpenAI_Translator {
 				<?php esc_html_e( 'Translate with OpenAI', 'polylang-openai-translator' ); ?>
 			</button>
 		</p>
+		<p>
+			<button type="button" class="button widefat" id="pot-translate-all-button">
+				<?php esc_html_e( 'Translate all languages', 'polylang-openai-translator' ); ?>
+			</button>
+		</p>
 		<p id="pot-translate-status" style="min-height:20px;"></p>
 		<script>
 			(function () {
 				const button = document.getElementById('pot-translate-button');
+				const allButton = document.getElementById('pot-translate-all-button');
 				const target = document.getElementById('pot-target-lang');
 				const status = document.getElementById('pot-translate-status');
 				if (!button || !target || !status) {
@@ -231,39 +237,86 @@ final class POT_Polylang_OpenAI_Translator {
 
 				button.addEventListener('click', async function () {
 					button.disabled = true;
+					if (allButton) {
+						allButton.disabled = true;
+					}
 					status.textContent = '<?php echo esc_js( __( 'Translating...', 'polylang-openai-translator' ) ); ?>';
 
-					const body = new URLSearchParams();
-					body.set('action', 'pot_translate_post');
-					body.set('nonce', '<?php echo esc_js( $nonce ); ?>');
-					body.set('post_id', '<?php echo esc_js( (string) $post->ID ); ?>');
-					body.set('target_lang', target.value);
-
 					try {
-						const response = await fetch(ajaxurl, {
-							method: 'POST',
-							credentials: 'same-origin',
-							headers: {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
-							body: body.toString()
-						});
-						const raw = await response.text();
-						let payload;
-						try {
-							payload = JSON.parse(raw);
-						} catch (parseError) {
-							throw new Error(formatAjaxHtmlError(raw, response.status));
-						}
-						if (!payload.success) {
-							throw new Error(payload.data && payload.data.message ? payload.data.message : '<?php echo esc_js( __( 'Translation failed.', 'polylang-openai-translator' ) ); ?>');
-						}
-
+						const payload = await translateLanguage(target.value);
 						status.innerHTML = '<a href="' + payload.data.edit_url + '">' + payload.data.message + '</a>';
 					} catch (error) {
 						status.textContent = error.message;
 					} finally {
 						button.disabled = false;
+						if (allButton) {
+							allButton.disabled = false;
+						}
 					}
 				});
+
+				if (allButton) {
+					allButton.addEventListener('click', async function () {
+						const options = Array.from(target.options).map(function (option) {
+							return {
+								slug: option.value,
+								label: option.textContent.trim()
+							};
+						});
+
+						if (!options.length) {
+							status.textContent = '<?php echo esc_js( __( 'No target languages found.', 'polylang-openai-translator' ) ); ?>';
+							return;
+						}
+
+						button.disabled = true;
+						allButton.disabled = true;
+						const completed = [];
+
+						try {
+							for (let index = 0; index < options.length; index++) {
+								const item = options[index];
+								status.textContent = '<?php echo esc_js( __( 'Translating', 'polylang-openai-translator' ) ); ?> ' + (index + 1) + '/' + options.length + ': ' + item.label;
+								const payload = await translateLanguage(item.slug);
+								completed.push('<a href="' + payload.data.edit_url + '">' + item.label + '</a>');
+							}
+
+							status.innerHTML = '<?php echo esc_js( __( 'All translations are ready:', 'polylang-openai-translator' ) ); ?> ' + completed.join(', ');
+						} catch (error) {
+							status.textContent = error.message + (completed.length ? ' <?php echo esc_js( __( 'Completed before error:', 'polylang-openai-translator' ) ); ?> ' + completed.length + '/' + options.length : '');
+						} finally {
+							button.disabled = false;
+							allButton.disabled = false;
+						}
+					});
+				}
+
+				async function translateLanguage(language) {
+					const body = new URLSearchParams();
+					body.set('action', 'pot_translate_post');
+					body.set('nonce', '<?php echo esc_js( $nonce ); ?>');
+					body.set('post_id', '<?php echo esc_js( (string) $post->ID ); ?>');
+					body.set('target_lang', language);
+
+					const response = await fetch(ajaxurl, {
+						method: 'POST',
+						credentials: 'same-origin',
+						headers: {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
+						body: body.toString()
+					});
+					const raw = await response.text();
+					let payload;
+					try {
+						payload = JSON.parse(raw);
+					} catch (parseError) {
+						throw new Error(formatAjaxHtmlError(raw, response.status));
+					}
+					if (!payload.success) {
+						throw new Error(payload.data && payload.data.message ? payload.data.message : '<?php echo esc_js( __( 'Translation failed.', 'polylang-openai-translator' ) ); ?>');
+					}
+
+					return payload;
+				}
 
 				function formatAjaxHtmlError(raw, statusCode) {
 					const titleMatch = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
