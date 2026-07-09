@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Polylang OpenAI Translator
  * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
- * Version: 0.1.11
+ * Version: 0.1.12
  * Author: Codex
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -23,6 +23,7 @@ final class POT_Polylang_OpenAI_Translator {
 		add_action( 'admin_notices', array( __CLASS__, 'maybe_show_dependency_notice' ) );
 		add_action( 'add_meta_boxes', array( __CLASS__, 'register_meta_box' ) );
 		add_action( 'wp_ajax_pot_translate_post', array( __CLASS__, 'ajax_translate_post' ) );
+		add_action( 'wp_ajax_pot_publish_translations', array( __CLASS__, 'ajax_publish_translations' ) );
 		add_filter( 'ajax_query_attachments_args', array( __CLASS__, 'maybe_show_all_media_in_editors' ), 999 );
 	}
 
@@ -224,11 +225,17 @@ final class POT_Polylang_OpenAI_Translator {
 				<?php esc_html_e( 'Translate all languages', 'polylang-openai-translator' ); ?>
 			</button>
 		</p>
+		<p>
+			<button type="button" class="button widefat" id="pot-publish-translations-button">
+				<?php esc_html_e( 'Publish all translations', 'polylang-openai-translator' ); ?>
+			</button>
+		</p>
 		<p id="pot-translate-status" style="min-height:20px;"></p>
 		<script>
 			(function () {
 				const button = document.getElementById('pot-translate-button');
 				const allButton = document.getElementById('pot-translate-all-button');
+				const publishButton = document.getElementById('pot-publish-translations-button');
 				const target = document.getElementById('pot-target-lang');
 				const status = document.getElementById('pot-translate-status');
 				if (!button || !target || !status) {
@@ -239,6 +246,9 @@ final class POT_Polylang_OpenAI_Translator {
 					button.disabled = true;
 					if (allButton) {
 						allButton.disabled = true;
+					}
+					if (publishButton) {
+						publishButton.disabled = true;
 					}
 					status.textContent = '<?php echo esc_js( __( 'Translating...', 'polylang-openai-translator' ) ); ?>';
 
@@ -251,6 +261,9 @@ final class POT_Polylang_OpenAI_Translator {
 						button.disabled = false;
 						if (allButton) {
 							allButton.disabled = false;
+						}
+						if (publishButton) {
+							publishButton.disabled = false;
 						}
 					}
 				});
@@ -271,6 +284,9 @@ final class POT_Polylang_OpenAI_Translator {
 
 						button.disabled = true;
 						allButton.disabled = true;
+						if (publishButton) {
+							publishButton.disabled = true;
+						}
 						const completed = [];
 
 						try {
@@ -287,6 +303,33 @@ final class POT_Polylang_OpenAI_Translator {
 						} finally {
 							button.disabled = false;
 							allButton.disabled = false;
+							if (publishButton) {
+								publishButton.disabled = false;
+							}
+						}
+					});
+				}
+
+				if (publishButton) {
+					publishButton.addEventListener('click', async function () {
+						button.disabled = true;
+						if (allButton) {
+							allButton.disabled = true;
+						}
+						publishButton.disabled = true;
+						status.textContent = '<?php echo esc_js( __( 'Publishing translations...', 'polylang-openai-translator' ) ); ?>';
+
+						try {
+							const payload = await publishTranslations();
+							status.textContent = payload.data.message;
+						} catch (error) {
+							status.textContent = error.message;
+						} finally {
+							button.disabled = false;
+							if (allButton) {
+								allButton.disabled = false;
+							}
+							publishButton.disabled = false;
 						}
 					});
 				}
@@ -313,6 +356,32 @@ final class POT_Polylang_OpenAI_Translator {
 					}
 					if (!payload.success) {
 						throw new Error(payload.data && payload.data.message ? payload.data.message : '<?php echo esc_js( __( 'Translation failed.', 'polylang-openai-translator' ) ); ?>');
+					}
+
+					return payload;
+				}
+
+				async function publishTranslations() {
+					const body = new URLSearchParams();
+					body.set('action', 'pot_publish_translations');
+					body.set('nonce', '<?php echo esc_js( $nonce ); ?>');
+					body.set('post_id', '<?php echo esc_js( (string) $post->ID ); ?>');
+
+					const response = await fetch(ajaxurl, {
+						method: 'POST',
+						credentials: 'same-origin',
+						headers: {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
+						body: body.toString()
+					});
+					const raw = await response.text();
+					let payload;
+					try {
+						payload = JSON.parse(raw);
+					} catch (parseError) {
+						throw new Error(formatAjaxHtmlError(raw, response.status));
+					}
+					if (!payload.success) {
+						throw new Error(payload.data && payload.data.message ? payload.data.message : '<?php echo esc_js( __( 'Publishing failed.', 'polylang-openai-translator' ) ); ?>');
 					}
 
 					return payload;
@@ -371,6 +440,39 @@ final class POT_Polylang_OpenAI_Translator {
 				'message' => __( 'Translation is ready. Open translated post.', 'polylang-openai-translator' ),
 				'post_id'  => $result,
 				'edit_url' => get_edit_post_link( $result, 'raw' ),
+			)
+		);
+	}
+
+	public static function ajax_publish_translations(): void {
+		$post_id = isset( $_POST['post_id'] ) ? absint( $_POST['post_id'] ) : 0;
+		if ( ! $post_id || ! check_ajax_referer( self::NONCE_ACTION . '_' . $post_id, 'nonce', false ) ) {
+			wp_send_json_error( array( 'message' => __( 'Security check failed.', 'polylang-openai-translator' ) ), 403 );
+		}
+
+		if ( ! current_user_can( 'edit_post', $post_id ) ) {
+			wp_send_json_error( array( 'message' => __( 'You cannot edit this post.', 'polylang-openai-translator' ) ), 403 );
+		}
+
+		if ( ! self::has_polylang() ) {
+			wp_send_json_error( array( 'message' => __( 'Polylang is not active.', 'polylang-openai-translator' ) ), 400 );
+		}
+
+		$result = self::publish_linked_translations( $post_id );
+		if ( is_wp_error( $result ) ) {
+			wp_send_json_error( array( 'message' => $result->get_error_message() ), 400 );
+		}
+
+		wp_send_json_success(
+			array(
+				'message' => sprintf(
+					/* translators: 1: published count, 2: skipped count */
+					__( 'Published %1$d translations. Skipped %2$d.', 'polylang-openai-translator' ),
+					$result['published'],
+					$result['skipped']
+				),
+				'published' => $result['published'],
+				'skipped'   => $result['skipped'],
 			)
 		);
 	}
@@ -481,6 +583,56 @@ final class POT_Polylang_OpenAI_Translator {
 		pll_save_post_translations( array_filter( $translations ) );
 
 		return $saved_id;
+	}
+
+	private static function publish_linked_translations( int $post_id ) {
+		$source_lang  = pll_get_post_language( $post_id, 'slug' );
+		$translations = pll_get_post_translations( $post_id );
+
+		if ( empty( $translations ) ) {
+			return new WP_Error( 'pot_no_translations', __( 'No linked translations found.', 'polylang-openai-translator' ) );
+		}
+
+		$published = 0;
+		$skipped   = 0;
+
+		foreach ( $translations as $lang => $translation_id ) {
+			$translation_id = absint( $translation_id );
+			if ( ! $translation_id || $translation_id === $post_id || $lang === $source_lang ) {
+				continue;
+			}
+
+			if ( ! current_user_can( 'publish_post', $translation_id ) || ! current_user_can( 'edit_post', $translation_id ) ) {
+				$skipped++;
+				continue;
+			}
+
+			$translation_post = get_post( $translation_id );
+			if ( ! $translation_post || 'publish' === $translation_post->post_status ) {
+				$skipped++;
+				continue;
+			}
+
+			$updated = wp_update_post(
+				array(
+					'ID'          => $translation_id,
+					'post_status' => 'publish',
+				),
+				true
+			);
+
+			if ( is_wp_error( $updated ) ) {
+				$skipped++;
+				continue;
+			}
+
+			$published++;
+		}
+
+		return array(
+			'published' => $published,
+			'skipped'   => $skipped,
+		);
 	}
 
 	private static function request_translation( WP_Post $post, string $source_lang, string $target_lang, bool $skip_content = false ) {
