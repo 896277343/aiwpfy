@@ -65,6 +65,7 @@ Use `Publish all translations` after review to publish linked translated posts i
 - API requests are forced to HTTP/1.1 to avoid HTTP/2 stream errors from some OpenAI-compatible gateways.
 - Temporary API transport errors such as empty replies, timeouts, stream errors, and connection resets are retried automatically.
 - If the admin box reports that the server returned HTML instead of JSON, the message usually points to a WordPress login page, PHP error page, host firewall page, or upstream gateway error.
+- AJAX actions catch PHP exceptions and fatal errors where possible so server-side 500 errors can show a more useful message.
 
 ## Example meta copy filter
 

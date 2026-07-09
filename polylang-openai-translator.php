@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Polylang OpenAI Translator
  * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
- * Version: 0.1.13
+ * Version: 0.1.14
  * Author: Codex
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -438,66 +438,78 @@ final class POT_Polylang_OpenAI_Translator {
 	}
 
 	public static function ajax_translate_post(): void {
-		$post_id = isset( $_POST['post_id'] ) ? absint( $_POST['post_id'] ) : 0;
-		if ( ! $post_id || ! check_ajax_referer( self::NONCE_ACTION . '_' . $post_id, 'nonce', false ) ) {
-			wp_send_json_error( array( 'message' => __( 'Security check failed.', 'polylang-openai-translator' ) ), 403 );
+		self::register_ajax_fatal_error_handler();
+
+		try {
+			$post_id = isset( $_POST['post_id'] ) ? absint( $_POST['post_id'] ) : 0;
+			if ( ! $post_id || ! check_ajax_referer( self::NONCE_ACTION . '_' . $post_id, 'nonce', false ) ) {
+				wp_send_json_error( array( 'message' => __( 'Security check failed.', 'polylang-openai-translator' ) ), 403 );
+			}
+
+			if ( ! current_user_can( 'edit_post', $post_id ) ) {
+				wp_send_json_error( array( 'message' => __( 'You cannot edit this post.', 'polylang-openai-translator' ) ), 403 );
+			}
+
+			if ( ! self::has_polylang() ) {
+				wp_send_json_error( array( 'message' => __( 'Polylang is not active.', 'polylang-openai-translator' ) ), 400 );
+			}
+
+			$target_lang = isset( $_POST['target_lang'] ) ? sanitize_key( wp_unslash( $_POST['target_lang'] ) ) : '';
+			$result      = self::translate_post( $post_id, $target_lang );
+
+			if ( is_wp_error( $result ) ) {
+				wp_send_json_error( array( 'message' => $result->get_error_message() ), 400 );
+			}
+
+			wp_send_json_success(
+				array(
+					'message' => __( 'Translation is ready. Open translated post.', 'polylang-openai-translator' ),
+					'post_id'  => $result,
+					'edit_url' => get_edit_post_link( $result, 'raw' ),
+				)
+			);
+		} catch ( Throwable $exception ) {
+			wp_send_json_error( array( 'message' => self::format_throwable_message( $exception ) ), 500 );
 		}
-
-		if ( ! current_user_can( 'edit_post', $post_id ) ) {
-			wp_send_json_error( array( 'message' => __( 'You cannot edit this post.', 'polylang-openai-translator' ) ), 403 );
-		}
-
-		if ( ! self::has_polylang() ) {
-			wp_send_json_error( array( 'message' => __( 'Polylang is not active.', 'polylang-openai-translator' ) ), 400 );
-		}
-
-		$target_lang = isset( $_POST['target_lang'] ) ? sanitize_key( wp_unslash( $_POST['target_lang'] ) ) : '';
-		$result      = self::translate_post( $post_id, $target_lang );
-
-		if ( is_wp_error( $result ) ) {
-			wp_send_json_error( array( 'message' => $result->get_error_message() ), 400 );
-		}
-
-		wp_send_json_success(
-			array(
-				'message' => __( 'Translation is ready. Open translated post.', 'polylang-openai-translator' ),
-				'post_id'  => $result,
-				'edit_url' => get_edit_post_link( $result, 'raw' ),
-			)
-		);
 	}
 
 	public static function ajax_publish_translations(): void {
-		$post_id = isset( $_POST['post_id'] ) ? absint( $_POST['post_id'] ) : 0;
-		if ( ! $post_id || ! check_ajax_referer( self::NONCE_ACTION . '_' . $post_id, 'nonce', false ) ) {
-			wp_send_json_error( array( 'message' => __( 'Security check failed.', 'polylang-openai-translator' ) ), 403 );
-		}
+		self::register_ajax_fatal_error_handler();
 
-		if ( ! current_user_can( 'edit_post', $post_id ) ) {
-			wp_send_json_error( array( 'message' => __( 'You cannot edit this post.', 'polylang-openai-translator' ) ), 403 );
-		}
+		try {
+			$post_id = isset( $_POST['post_id'] ) ? absint( $_POST['post_id'] ) : 0;
+			if ( ! $post_id || ! check_ajax_referer( self::NONCE_ACTION . '_' . $post_id, 'nonce', false ) ) {
+				wp_send_json_error( array( 'message' => __( 'Security check failed.', 'polylang-openai-translator' ) ), 403 );
+			}
 
-		if ( ! self::has_polylang() ) {
-			wp_send_json_error( array( 'message' => __( 'Polylang is not active.', 'polylang-openai-translator' ) ), 400 );
-		}
+			if ( ! current_user_can( 'edit_post', $post_id ) ) {
+				wp_send_json_error( array( 'message' => __( 'You cannot edit this post.', 'polylang-openai-translator' ) ), 403 );
+			}
 
-		$result = self::publish_linked_translations( $post_id );
-		if ( is_wp_error( $result ) ) {
-			wp_send_json_error( array( 'message' => $result->get_error_message() ), 400 );
-		}
+			if ( ! self::has_polylang() ) {
+				wp_send_json_error( array( 'message' => __( 'Polylang is not active.', 'polylang-openai-translator' ) ), 400 );
+			}
 
-		wp_send_json_success(
-			array(
-				'message' => sprintf(
-					/* translators: 1: published count, 2: skipped count */
-					__( 'Published %1$d translations. Skipped %2$d.', 'polylang-openai-translator' ),
-					$result['published'],
-					$result['skipped']
-				),
-				'published' => $result['published'],
-				'skipped'   => $result['skipped'],
-			)
-		);
+			$result = self::publish_linked_translations( $post_id );
+			if ( is_wp_error( $result ) ) {
+				wp_send_json_error( array( 'message' => $result->get_error_message() ), 400 );
+			}
+
+			wp_send_json_success(
+				array(
+					'message' => sprintf(
+						/* translators: 1: published count, 2: skipped count */
+						__( 'Published %1$d translations. Skipped %2$d.', 'polylang-openai-translator' ),
+						$result['published'],
+						$result['skipped']
+					),
+					'published' => $result['published'],
+					'skipped'   => $result['skipped'],
+				)
+			);
+		} catch ( Throwable $exception ) {
+			wp_send_json_error( array( 'message' => self::format_throwable_message( $exception ) ), 500 );
+		}
 	}
 
 	public static function maybe_show_all_media_in_editors( array $query ): array {
@@ -655,6 +667,58 @@ final class POT_Polylang_OpenAI_Translator {
 		return array(
 			'published' => $published,
 			'skipped'   => $skipped,
+		);
+	}
+
+	private static function register_ajax_fatal_error_handler(): void {
+		static $registered = false;
+		if ( $registered ) {
+			return;
+		}
+
+		$registered = true;
+		register_shutdown_function(
+			static function (): void {
+				$error = error_get_last();
+				if ( ! is_array( $error ) || empty( $error['type'] ) ) {
+					return;
+				}
+
+				$fatal_types = array( E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR );
+				if ( ! in_array( (int) $error['type'], $fatal_types, true ) ) {
+					return;
+				}
+
+				$message = sprintf(
+					'PHP fatal error: %s in %s:%d',
+					$error['message'] ?? 'unknown error',
+					$error['file'] ?? 'unknown file',
+					$error['line'] ?? 0
+				);
+
+				if ( ! headers_sent() ) {
+					status_header( 500 );
+					header( 'Content-Type: application/json; charset=' . get_option( 'blog_charset' ) );
+				}
+
+				echo wp_json_encode(
+					array(
+						'success' => false,
+						'data'    => array(
+							'message' => $message,
+						),
+					)
+				);
+			}
+		);
+	}
+
+	private static function format_throwable_message( Throwable $exception ): string {
+		return sprintf(
+			'PHP error: %s in %s:%d',
+			$exception->getMessage(),
+			$exception->getFile(),
+			$exception->getLine()
 		);
 	}
 
