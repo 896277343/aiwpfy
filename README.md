@@ -12,7 +12,7 @@ A small WordPress plugin that works alongside Polylang to translate posts, pages
 - Uses Polylang APIs to set the target language and link translations.
 - Preserves Gutenberg block comments, HTML, shortcodes, URLs, product codes, featured image, page template, and public taxonomy terms where possible.
 - Translates Elementor page content stored in `_elementor_data` while preserving Elementor sections, widgets, IDs, images, links, and style settings.
-- When Polylang Media is enabled, translates referenced media attachment title, alt text, caption, and description without duplicating the physical file.
+- Optionally translates referenced media attachment title, alt text, caption, and description without duplicating the physical file.
 
 ## Install
 
@@ -50,7 +50,8 @@ Examples:
 - Standard WordPress/Gutenberg content is translated from normal title, excerpt, and content fields.
 - Elementor content is translated from `_elementor_data`; only common visible text fields are translated.
 - Elementor pages skip redundant `post_content` translation and use larger text batches to reduce API round trips.
-- Media translation is lightweight: the featured image and Elementor image attachments used by the page are translated if Polylang has media translation enabled. The original file is reused.
+- Media metadata translation is off by default. Leave it off if your editor or page builder has trouble finding images when Polylang Media filtering is enabled.
+- If media metadata translation is enabled, the featured image and Elementor image attachments used by the page are translated only when the original media already has a Polylang language. The original file is reused.
 - If you use other page builders that store content in custom post meta, add meta keys through the `pot_openai_translator_copy_meta_keys` filter to copy them. Custom translation support can be added by extending the plugin for that builder's data format.
 - Very long pages may need a larger `Max output tokens` setting or may need to be translated in sections.
 - If you see `cURL error 28`, increase `Request timeout` first. If it still happens with `0 bytes received`, the WordPress server may be unable to reach your API endpoint or the provider may not send a response before closing.

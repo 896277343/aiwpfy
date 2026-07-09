@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Polylang OpenAI Translator
  * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
- * Version: 0.1.8
+ * Version: 0.1.9
  * Author: Codex
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -133,6 +133,16 @@ final class POT_Polylang_OpenAI_Translator {
 						<td>
 							<input id="pot-request-timeout" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[request_timeout]" type="number" min="30" max="900" step="30" value="<?php echo esc_attr( (string) $options['request_timeout'] ); ?>" />
 							<p class="description"><?php esc_html_e( 'Seconds to wait for each API request. Use a larger value for slow compatible API providers or long Elementor pages.', 'polylang-openai-translator' ); ?></p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Media metadata', 'polylang-openai-translator' ); ?></th>
+						<td>
+							<label for="pot-translate-media">
+								<input id="pot-translate-media" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[translate_media]" type="checkbox" value="1" <?php checked( ! empty( $options['translate_media'] ) ); ?> />
+								<?php esc_html_e( 'Translate referenced media metadata and create Polylang media translations', 'polylang-openai-translator' ); ?>
+							</label>
+							<p class="description"><?php esc_html_e( 'Leave off unless you specifically need translated media title, alt text, caption, and description. Turning this on may affect how Polylang filters media in editors.', 'polylang-openai-translator' ); ?></p>
 						</td>
 					</tr>
 					<tr>
@@ -458,9 +468,12 @@ final class POT_Polylang_OpenAI_Translator {
 			return new WP_Error( 'pot_bad_elementor_json', __( 'Elementor data exists but is not valid JSON.', 'polylang-openai-translator' ) );
 		}
 
-		$media_result = self::translate_elementor_media_references( $data, $source_lang, $target_lang );
-		if ( is_wp_error( $media_result ) ) {
-			return $media_result;
+		$options = self::get_options();
+		if ( ! empty( $options['translate_media'] ) ) {
+			$media_result = self::translate_elementor_media_references( $data, $source_lang, $target_lang );
+			if ( is_wp_error( $media_result ) ) {
+				return $media_result;
+			}
 		}
 
 		$strings = array();
@@ -839,10 +852,16 @@ final class POT_Polylang_OpenAI_Translator {
 	private static function copy_post_context( int $source_id, int $target_id, string $target_lang ): void {
 		$thumbnail_id = get_post_thumbnail_id( $source_id );
 		if ( $thumbnail_id ) {
-			$target_thumbnail_id = self::translate_media_attachment( $thumbnail_id, (string) pll_get_post_language( $source_id, 'slug' ), $target_lang );
-			if ( ! is_wp_error( $target_thumbnail_id ) && $target_thumbnail_id ) {
-				set_post_thumbnail( $target_id, $target_thumbnail_id );
-			} else {
+			$options = self::get_options();
+			if ( ! empty( $options['translate_media'] ) ) {
+				$target_thumbnail_id = self::translate_media_attachment( $thumbnail_id, (string) pll_get_post_language( $source_id, 'slug' ), $target_lang );
+				if ( ! is_wp_error( $target_thumbnail_id ) && $target_thumbnail_id ) {
+					set_post_thumbnail( $target_id, $target_thumbnail_id );
+					$thumbnail_id = 0;
+				}
+			}
+
+			if ( $thumbnail_id ) {
 				set_post_thumbnail( $target_id, $thumbnail_id );
 			}
 		}
@@ -903,8 +922,8 @@ final class POT_Polylang_OpenAI_Translator {
 
 		if ( function_exists( 'pll_get_post_language' ) ) {
 			$current_lang = pll_get_post_language( $attachment_id, 'slug' );
-			if ( empty( $current_lang ) && $source_lang && function_exists( 'pll_set_post_language' ) ) {
-				pll_set_post_language( $attachment_id, $source_lang );
+			if ( empty( $current_lang ) ) {
+				return $attachment_id;
 			}
 		}
 
@@ -1043,6 +1062,7 @@ final class POT_Polylang_OpenAI_Translator {
 			'api_format'          => isset( $input['api_format'] ) && in_array( $input['api_format'], array( 'responses', 'chat_completions' ), true ) ? $input['api_format'] : $defaults['api_format'],
 			'max_output_tokens'   => isset( $input['max_output_tokens'] ) ? max( 1000, min( 50000, absint( $input['max_output_tokens'] ) ) ) : $defaults['max_output_tokens'],
 			'request_timeout'     => isset( $input['request_timeout'] ) ? max( 30, min( 900, absint( $input['request_timeout'] ) ) ) : $defaults['request_timeout'],
+			'translate_media'     => ! empty( $input['translate_media'] ) ? 1 : 0,
 			'custom_instructions' => isset( $input['custom_instructions'] ) ? sanitize_textarea_field( $input['custom_instructions'] ) : '',
 		);
 	}
@@ -1059,6 +1079,7 @@ final class POT_Polylang_OpenAI_Translator {
 			'api_format'          => 'responses',
 			'max_output_tokens'   => 12000,
 			'request_timeout'     => 300,
+			'translate_media'     => 0,
 			'custom_instructions' => 'Use natural, business-ready wording. Preserve technical terms when translating them would reduce accuracy.',
 		);
 	}
