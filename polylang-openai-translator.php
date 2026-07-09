@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Polylang OpenAI Translator
  * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
- * Version: 0.1.5
+ * Version: 0.1.6
  * Author: Codex
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -225,7 +225,13 @@ final class POT_Polylang_OpenAI_Translator {
 							headers: {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
 							body: body.toString()
 						});
-						const payload = await response.json();
+						const raw = await response.text();
+						let payload;
+						try {
+							payload = JSON.parse(raw);
+						} catch (parseError) {
+							throw new Error(formatAjaxHtmlError(raw, response.status));
+						}
 						if (!payload.success) {
 							throw new Error(payload.data && payload.data.message ? payload.data.message : '<?php echo esc_js( __( 'Translation failed.', 'polylang-openai-translator' ) ); ?>');
 						}
@@ -237,6 +243,29 @@ final class POT_Polylang_OpenAI_Translator {
 						button.disabled = false;
 					}
 				});
+
+				function formatAjaxHtmlError(raw, statusCode) {
+					const titleMatch = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+					if (titleMatch && titleMatch[1]) {
+						return 'Server returned HTML instead of JSON (' + statusCode + '): ' + decodeHtml(titleMatch[1]).trim();
+					}
+
+					const text = raw.replace(/<script[\s\S]*?<\/script>/gi, ' ')
+						.replace(/<style[\s\S]*?<\/style>/gi, ' ')
+						.replace(/<[^>]+>/g, ' ')
+						.replace(/\s+/g, ' ')
+						.trim();
+
+					return text
+						? 'Server returned HTML instead of JSON (' + statusCode + '): ' + text.slice(0, 300)
+						: 'Server returned an empty or invalid response (' + statusCode + ').';
+				}
+
+				function decodeHtml(value) {
+					const textarea = document.createElement('textarea');
+					textarea.innerHTML = value;
+					return textarea.value;
+				}
 			})();
 		</script>
 		<?php

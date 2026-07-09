@@ -52,6 +52,7 @@ Examples:
 - Very long pages may need a larger `Max output tokens` setting or may need to be translated in sections.
 - If you see `cURL error 28`, increase `Request timeout` first. If it still happens with `0 bytes received`, the WordPress server may be unable to reach your API endpoint or the provider may not send a response before closing.
 - API requests are forced to HTTP/1.1 to avoid HTTP/2 stream errors from some OpenAI-compatible gateways.
+- If the admin box reports that the server returned HTML instead of JSON, the message usually points to a WordPress login page, PHP error page, host firewall page, or upstream gateway error.
 
 ## Example meta copy filter
 
