@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Polylang OpenAI Translator
  * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
- * Version: 0.1.6
+ * Version: 0.1.7
  * Author: Codex
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -326,7 +326,8 @@ final class POT_Polylang_OpenAI_Translator {
 			return new WP_Error( 'pot_same_language', __( 'Target language is the same as the source language.', 'polylang-openai-translator' ) );
 		}
 
-		$translation = self::request_translation( $post, $source_lang, $target_lang );
+		$has_elementor_data = self::has_elementor_data( $post_id );
+		$translation        = self::request_translation( $post, $source_lang, $target_lang, $has_elementor_data );
 		if ( is_wp_error( $translation ) ) {
 			return $translation;
 		}
@@ -375,7 +376,7 @@ final class POT_Polylang_OpenAI_Translator {
 		return $saved_id;
 	}
 
-	private static function request_translation( WP_Post $post, string $source_lang, string $target_lang ) {
+	private static function request_translation( WP_Post $post, string $source_lang, string $target_lang, bool $skip_content = false ) {
 		$options = self::get_options();
 		if ( empty( $options['api_key'] ) ) {
 			return new WP_Error( 'pot_missing_api_key', __( 'OpenAI API key is missing.', 'polylang-openai-translator' ) );
@@ -384,7 +385,7 @@ final class POT_Polylang_OpenAI_Translator {
 		$payload = array(
 			'title'   => get_the_title( $post ),
 			'excerpt' => $post->post_excerpt,
-			'content' => $post->post_content,
+			'content' => $skip_content ? '' : $post->post_content,
 		);
 
 		$instructions = self::build_instructions( $source_lang, $target_lang, $options['custom_instructions'] );
@@ -428,8 +429,13 @@ final class POT_Polylang_OpenAI_Translator {
 		return array(
 			'title'   => sanitize_text_field( $translation['title'] ?? '' ),
 			'excerpt' => (string) ( $translation['excerpt'] ?? '' ),
-			'content' => (string) ( $translation['content'] ?? '' ),
+			'content' => $skip_content ? $post->post_content : (string) ( $translation['content'] ?? '' ),
 		);
+	}
+
+	private static function has_elementor_data( int $post_id ): bool {
+		$raw_data = get_post_meta( $post_id, '_elementor_data', true );
+		return '' !== $raw_data && null !== $raw_data;
 	}
 
 	private static function translate_builder_content( int $source_id, int $target_id, string $source_lang, string $target_lang ) {
@@ -546,7 +552,7 @@ final class POT_Polylang_OpenAI_Translator {
 		$chunk_chars = 0;
 		foreach ( $strings as $key => $value ) {
 			$value_chars = strlen( (string) $value );
-			if ( $chunk && ( count( $chunk ) >= 40 || $chunk_chars + $value_chars > 16000 ) ) {
+			if ( $chunk && ( count( $chunk ) >= 80 || $chunk_chars + $value_chars > 20000 ) ) {
 				$chunks[]    = $chunk;
 				$chunk       = array();
 				$chunk_chars = 0;
