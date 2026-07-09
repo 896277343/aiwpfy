@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Polylang OpenAI Translator
  * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
- * Version: 0.1.9
+ * Version: 0.1.10
  * Author: Codex
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -23,6 +23,7 @@ final class POT_Polylang_OpenAI_Translator {
 		add_action( 'admin_notices', array( __CLASS__, 'maybe_show_dependency_notice' ) );
 		add_action( 'add_meta_boxes', array( __CLASS__, 'register_meta_box' ) );
 		add_action( 'wp_ajax_pot_translate_post', array( __CLASS__, 'ajax_translate_post' ) );
+		add_filter( 'ajax_query_attachments_args', array( __CLASS__, 'maybe_show_all_media_in_editors' ), 999 );
 	}
 
 	public static function register_settings(): void {
@@ -143,6 +144,16 @@ final class POT_Polylang_OpenAI_Translator {
 								<?php esc_html_e( 'Translate referenced media metadata and create Polylang media translations', 'polylang-openai-translator' ); ?>
 							</label>
 							<p class="description"><?php esc_html_e( 'Leave off unless you specifically need translated media title, alt text, caption, and description. Turning this on may affect how Polylang filters media in editors.', 'polylang-openai-translator' ); ?></p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Editor media library', 'polylang-openai-translator' ); ?></th>
+						<td>
+							<label for="pot-show-all-media">
+								<input id="pot-show-all-media" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[show_all_media_in_editors]" type="checkbox" value="1" <?php checked( ! empty( $options['show_all_media_in_editors'] ) ); ?> />
+								<?php esc_html_e( 'Show all language media in editor image pickers', 'polylang-openai-translator' ); ?>
+							</label>
+							<p class="description"><?php esc_html_e( 'Recommended when Polylang Media is enabled and Elementor or WordPress image pickers only show a few images.', 'polylang-openai-translator' ); ?></p>
 						</td>
 					</tr>
 					<tr>
@@ -309,6 +320,39 @@ final class POT_Polylang_OpenAI_Translator {
 				'edit_url' => get_edit_post_link( $result, 'raw' ),
 			)
 		);
+	}
+
+	public static function maybe_show_all_media_in_editors( array $query ): array {
+		if ( ! is_admin() || ! current_user_can( 'upload_files' ) ) {
+			return $query;
+		}
+
+		$options = self::get_options();
+		if ( empty( $options['show_all_media_in_editors'] ) ) {
+			return $query;
+		}
+
+		unset( $query['lang'] );
+		$query['suppress_filters'] = true;
+
+		if ( isset( $query['tax_query'] ) && is_array( $query['tax_query'] ) ) {
+			$query['tax_query'] = self::remove_language_tax_queries( $query['tax_query'] );
+		}
+
+		return $query;
+	}
+
+	private static function remove_language_tax_queries( array $tax_query ): array {
+		$clean = array();
+		foreach ( $tax_query as $key => $clause ) {
+			if ( is_array( $clause ) && isset( $clause['taxonomy'] ) && 'language' === $clause['taxonomy'] ) {
+				continue;
+			}
+
+			$clean[ $key ] = is_array( $clause ) ? self::remove_language_tax_queries( $clause ) : $clause;
+		}
+
+		return $clean;
 	}
 
 	private static function translate_post( int $post_id, string $target_lang ) {
@@ -1063,6 +1107,7 @@ final class POT_Polylang_OpenAI_Translator {
 			'max_output_tokens'   => isset( $input['max_output_tokens'] ) ? max( 1000, min( 50000, absint( $input['max_output_tokens'] ) ) ) : $defaults['max_output_tokens'],
 			'request_timeout'     => isset( $input['request_timeout'] ) ? max( 30, min( 900, absint( $input['request_timeout'] ) ) ) : $defaults['request_timeout'],
 			'translate_media'     => ! empty( $input['translate_media'] ) ? 1 : 0,
+			'show_all_media_in_editors' => ! empty( $input['show_all_media_in_editors'] ) ? 1 : 0,
 			'custom_instructions' => isset( $input['custom_instructions'] ) ? sanitize_textarea_field( $input['custom_instructions'] ) : '',
 		);
 	}
@@ -1080,6 +1125,7 @@ final class POT_Polylang_OpenAI_Translator {
 			'max_output_tokens'   => 12000,
 			'request_timeout'     => 300,
 			'translate_media'     => 0,
+			'show_all_media_in_editors' => 1,
 			'custom_instructions' => 'Use natural, business-ready wording. Preserve technical terms when translating them would reduce accuracy.',
 		);
 	}

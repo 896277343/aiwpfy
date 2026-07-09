@@ -52,6 +52,7 @@ Examples:
 - Elementor pages skip redundant `post_content` translation and use larger text batches to reduce API round trips.
 - Media metadata translation is off by default. Leave it off if your editor or page builder has trouble finding images when Polylang Media filtering is enabled.
 - If media metadata translation is enabled, the featured image and Elementor image attachments used by the page are translated only when the original media already has a Polylang language. The original file is reused.
+- Editor image pickers can show all language media by default, which helps when Polylang Media filtering makes Elementor or WordPress show only a few images.
 - If you use other page builders that store content in custom post meta, add meta keys through the `pot_openai_translator_copy_meta_keys` filter to copy them. Custom translation support can be added by extending the plugin for that builder's data format.
 - Very long pages may need a larger `Max output tokens` setting or may need to be translated in sections.
 - If you see `cURL error 28`, increase `Request timeout` first. If it still happens with `0 bytes received`, the WordPress server may be unable to reach your API endpoint or the provider may not send a response before closing.
