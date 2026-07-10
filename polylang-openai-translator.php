@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Polylang OpenAI Translator
  * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
- * Version: 0.1.14
+ * Version: 0.1.15
  * Author: Codex
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -728,10 +728,11 @@ final class POT_Polylang_OpenAI_Translator {
 			return new WP_Error( 'pot_missing_api_key', __( 'OpenAI API key is missing.', 'polylang-openai-translator' ) );
 		}
 
+		$should_chunk_content = ! $skip_content && self::should_chunk_post_content( $post->post_content );
 		$payload = array(
 			'title'   => get_the_title( $post ),
 			'excerpt' => $post->post_excerpt,
-			'content' => $skip_content ? '' : $post->post_content,
+			'content' => ( $skip_content || $should_chunk_content ) ? '' : $post->post_content,
 		);
 
 		$instructions = self::build_instructions( $source_lang, $target_lang, $options['custom_instructions'] );
@@ -759,11 +760,79 @@ final class POT_Polylang_OpenAI_Translator {
 			return $translation;
 		}
 
+		$content = $skip_content ? $post->post_content : (string) ( $translation['content'] ?? '' );
+		if ( $should_chunk_content ) {
+			$content = self::request_chunked_content_translation( $post->post_content, $source_lang, $target_lang );
+			if ( is_wp_error( $content ) ) {
+				return $content;
+			}
+		}
+
 		return array(
 			'title'   => sanitize_text_field( $translation['title'] ?? '' ),
 			'excerpt' => (string) ( $translation['excerpt'] ?? '' ),
-			'content' => $skip_content ? $post->post_content : (string) ( $translation['content'] ?? '' ),
+			'content' => $content,
 		);
+	}
+
+	private static function should_chunk_post_content( string $content ): bool {
+		return strlen( $content ) > 6000 || ( function_exists( 'has_blocks' ) && has_blocks( $content ) && strlen( $content ) > 3000 );
+	}
+
+	private static function request_chunked_content_translation( string $content, string $source_lang, string $target_lang ) {
+		$chunks = self::split_post_content_into_chunks( $content );
+		if ( count( $chunks ) <= 1 ) {
+			$result = self::request_string_map_translation( array( 'content' => $content ), $source_lang, $target_lang );
+			return is_wp_error( $result ) ? $result : (string) ( $result['content'] ?? $content );
+		}
+
+		$translated = self::request_string_map_translation( $chunks, $source_lang, $target_lang );
+		if ( is_wp_error( $translated ) ) {
+			return $translated;
+		}
+
+		$output = '';
+		foreach ( array_keys( $chunks ) as $key ) {
+			$output .= (string) ( $translated[ $key ] ?? $chunks[ $key ] );
+		}
+
+		return $output;
+	}
+
+	private static function split_post_content_into_chunks( string $content ): array {
+		$parts = array();
+		if ( function_exists( 'has_blocks' ) && has_blocks( $content ) && function_exists( 'parse_blocks' ) && function_exists( 'serialize_block' ) ) {
+			foreach ( parse_blocks( $content ) as $block ) {
+				$serialized = serialize_block( $block );
+				if ( '' !== trim( $serialized ) ) {
+					$parts[] = $serialized;
+				}
+			}
+		}
+
+		if ( empty( $parts ) ) {
+			$parts = preg_split( "/(\n\s*\n)/", $content, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY );
+		}
+
+		$chunks        = array();
+		$current       = '';
+		$current_index = 1;
+
+		foreach ( $parts as $part ) {
+			if ( '' !== $current && strlen( $current ) + strlen( $part ) > 5000 ) {
+				$chunks[ 'content_' . $current_index ] = $current;
+				$current                              = '';
+				$current_index++;
+			}
+
+			$current .= $part;
+		}
+
+		if ( '' !== $current ) {
+			$chunks[ 'content_' . $current_index ] = $current;
+		}
+
+		return $chunks ? $chunks : array( 'content_1' => $content );
 	}
 
 	private static function has_elementor_data( int $post_id ): bool {
@@ -928,7 +997,10 @@ final class POT_Polylang_OpenAI_Translator {
 		$chunk_chars = 0;
 		foreach ( $strings as $key => $value ) {
 			$value_chars = strlen( (string) $value );
-			if ( $chunk && ( count( $chunk ) >= 80 || $chunk_chars + $value_chars > 20000 ) ) {
+			$is_content_chunk = 0 === strpos( (string) $key, 'content_' );
+			$max_items        = $is_content_chunk ? 3 : 80;
+			$max_chars        = $is_content_chunk ? 12000 : 20000;
+			if ( $chunk && ( count( $chunk ) >= $max_items || $chunk_chars + $value_chars > $max_chars ) ) {
 				$chunks[]    = $chunk;
 				$chunk       = array();
 				$chunk_chars = 0;
@@ -1084,6 +1156,7 @@ final class POT_Polylang_OpenAI_Translator {
 
 		$last_response = null;
 		for ( $attempt = 1; $attempt <= 3; $attempt++ ) {
+			self::refresh_time_limit( (int) $options['request_timeout'] + 60 );
 			self::enable_http11_for_next_request();
 			$response = wp_remote_post( $endpoint, $args );
 			self::disable_http11_for_next_request();
@@ -1101,6 +1174,12 @@ final class POT_Polylang_OpenAI_Translator {
 		}
 
 		return $last_response;
+	}
+
+	private static function refresh_time_limit( int $seconds ): void {
+		if ( function_exists( 'set_time_limit' ) ) {
+			@set_time_limit( max( 120, $seconds ) );
+		}
 	}
 
 	private static function is_retryable_http_error( WP_Error $error ): bool {

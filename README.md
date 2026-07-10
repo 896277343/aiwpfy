@@ -54,6 +54,7 @@ Use `Publish all translations` after review to publish linked translated posts i
 
 - The plugin intentionally saves translated content as a draft so a human can review before publishing.
 - Standard WordPress/Gutenberg content is translated from normal title, excerpt, and content fields.
+- Long WordPress/Gutenberg/GeneratePress pages are translated in content chunks to reduce timeout risk.
 - Elementor content is translated from `_elementor_data`; only common visible text fields are translated.
 - Elementor pages skip redundant `post_content` translation and use larger text batches to reduce API round trips.
 - Media metadata translation is off by default. Leave it off if your editor or page builder has trouble finding images when Polylang Media filtering is enabled.
@@ -61,6 +62,7 @@ Use `Publish all translations` after review to publish linked translated posts i
 - Editor image pickers can show all language media by default, which helps when Polylang Media filtering makes Elementor or WordPress show only a few images.
 - If you use other page builders that store content in custom post meta, add meta keys through the `pot_openai_translator_copy_meta_keys` filter to copy them. Custom translation support can be added by extending the plugin for that builder's data format.
 - Very long pages may need a larger `Max output tokens` setting or may need to be translated in sections.
+- For long homepages built with GeneratePress or block editor content, the plugin splits top-level blocks into smaller translation requests.
 - If you see `cURL error 28`, increase `Request timeout` first. If it still happens with `0 bytes received`, the WordPress server may be unable to reach your API endpoint or the provider may not send a response before closing.
 - API requests are forced to HTTP/1.1 to avoid HTTP/2 stream errors from some OpenAI-compatible gateways.
 - Temporary API transport errors such as empty replies, timeouts, stream errors, and connection resets are retried automatically.
