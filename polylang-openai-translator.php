@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Polylang OpenAI Translator
  * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
- * Version: 0.1.15
+ * Version: 0.1.16
  * Author: Codex
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -23,6 +23,7 @@ final class POT_Polylang_OpenAI_Translator {
 		add_action( 'admin_notices', array( __CLASS__, 'maybe_show_dependency_notice' ) );
 		add_action( 'add_meta_boxes', array( __CLASS__, 'register_meta_box' ) );
 		add_action( 'wp_ajax_pot_translate_post', array( __CLASS__, 'ajax_translate_post' ) );
+		add_action( 'wp_ajax_pot_translate_job_step', array( __CLASS__, 'ajax_translate_job_step' ) );
 		add_action( 'wp_ajax_pot_publish_translations', array( __CLASS__, 'ajax_publish_translations' ) );
 		add_filter( 'ajax_query_attachments_args', array( __CLASS__, 'maybe_show_all_media_in_editors' ), 999 );
 	}
@@ -358,6 +359,48 @@ final class POT_Polylang_OpenAI_Translator {
 						throw new Error(payload.data && payload.data.message ? payload.data.message : '<?php echo esc_js( __( 'Translation failed.', 'polylang-openai-translator' ) ); ?>');
 					}
 
+					if (payload.data && payload.data.job_id) {
+						return await runTranslationJob(payload.data.job_id);
+					}
+
+					return payload;
+				}
+
+				async function runTranslationJob(jobId) {
+					let payload;
+					do {
+						payload = await translateJobStep(jobId);
+						if (payload.data && payload.data.message) {
+							status.textContent = payload.data.message;
+						}
+					} while (payload.data && !payload.data.done);
+
+					return payload;
+				}
+
+				async function translateJobStep(jobId) {
+					const body = new URLSearchParams();
+					body.set('action', 'pot_translate_job_step');
+					body.set('nonce', '<?php echo esc_js( $nonce ); ?>');
+					body.set('job_id', jobId);
+
+					const response = await fetch(ajaxurl, {
+						method: 'POST',
+						credentials: 'same-origin',
+						headers: {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
+						body: body.toString()
+					});
+					const raw = await response.text();
+					let payload;
+					try {
+						payload = JSON.parse(raw);
+					} catch (parseError) {
+						throw new Error(formatAjaxHtmlError(raw, response.status));
+					}
+					if (!payload.success) {
+						throw new Error(payload.data && payload.data.message ? payload.data.message : '<?php echo esc_js( __( 'Translation failed.', 'polylang-openai-translator' ) ); ?>');
+					}
+
 					return payload;
 				}
 
@@ -455,6 +498,20 @@ final class POT_Polylang_OpenAI_Translator {
 			}
 
 			$target_lang = isset( $_POST['target_lang'] ) ? sanitize_key( wp_unslash( $_POST['target_lang'] ) ) : '';
+			$job_id      = self::maybe_create_translation_job( $post_id, $target_lang );
+			if ( is_wp_error( $job_id ) ) {
+				wp_send_json_error( array( 'message' => $job_id->get_error_message() ), 400 );
+			}
+			if ( $job_id ) {
+				wp_send_json_success(
+					array(
+						'job_id'  => $job_id,
+						'done'    => false,
+						'message' => __( 'Large page detected. Starting chunked translation...', 'polylang-openai-translator' ),
+					)
+				);
+			}
+
 			$result      = self::translate_post( $post_id, $target_lang );
 
 			if ( is_wp_error( $result ) ) {
@@ -468,6 +525,26 @@ final class POT_Polylang_OpenAI_Translator {
 					'edit_url' => get_edit_post_link( $result, 'raw' ),
 				)
 			);
+		} catch ( Throwable $exception ) {
+			wp_send_json_error( array( 'message' => self::format_throwable_message( $exception ) ), 500 );
+		}
+	}
+
+	public static function ajax_translate_job_step(): void {
+		self::register_ajax_fatal_error_handler();
+
+		try {
+			$job_id = isset( $_POST['job_id'] ) ? sanitize_key( wp_unslash( $_POST['job_id'] ) ) : '';
+			if ( '' === $job_id || ! check_ajax_referer( self::NONCE_ACTION . '_' . self::get_job_post_id( $job_id ), 'nonce', false ) ) {
+				wp_send_json_error( array( 'message' => __( 'Security check failed.', 'polylang-openai-translator' ) ), 403 );
+			}
+
+			$result = self::process_translation_job_step( $job_id );
+			if ( is_wp_error( $result ) ) {
+				wp_send_json_error( array( 'message' => $result->get_error_message() ), 400 );
+			}
+
+			wp_send_json_success( $result );
 		} catch ( Throwable $exception ) {
 			wp_send_json_error( array( 'message' => self::format_throwable_message( $exception ) ), 500 );
 		}
@@ -576,6 +653,10 @@ final class POT_Polylang_OpenAI_Translator {
 			return $translation;
 		}
 
+		return self::save_translated_post( $post, $post_id, $source_lang, $target_lang, $translation );
+	}
+
+	private static function save_translated_post( WP_Post $post, int $post_id, string $source_lang, string $target_lang, array $translation ) {
 		$translations    = pll_get_post_translations( $post_id );
 		$translated_id   = isset( $translations[ $target_lang ] ) ? absint( $translations[ $target_lang ] ) : 0;
 		$translated_post = $translated_id ? get_post( $translated_id ) : null;
@@ -618,6 +699,143 @@ final class POT_Polylang_OpenAI_Translator {
 		pll_save_post_translations( array_filter( $translations ) );
 
 		return $saved_id;
+	}
+
+	private static function maybe_create_translation_job( int $post_id, string $target_lang ) {
+		$post = get_post( $post_id );
+		if ( ! $post || self::has_elementor_data( $post_id ) || ! self::should_chunk_post_content( $post->post_content ) ) {
+			return '';
+		}
+
+		$available_langs = pll_languages_list( array( 'fields' => 'slug' ) );
+		if ( ! in_array( $target_lang, $available_langs, true ) ) {
+			return new WP_Error( 'pot_bad_language', __( 'Target language is not configured in Polylang.', 'polylang-openai-translator' ) );
+		}
+
+		$source_lang = pll_get_post_language( $post_id, 'slug' );
+		if ( empty( $source_lang ) && function_exists( 'pll_default_language' ) ) {
+			$source_lang = pll_default_language( 'slug' );
+			pll_set_post_language( $post_id, $source_lang );
+		}
+
+		if ( empty( $source_lang ) ) {
+			return new WP_Error( 'pot_missing_source_language', __( 'Source post language is not set in Polylang.', 'polylang-openai-translator' ) );
+		}
+
+		if ( $source_lang === $target_lang ) {
+			return new WP_Error( 'pot_same_language', __( 'Target language is the same as the source language.', 'polylang-openai-translator' ) );
+		}
+
+		$job_id = 'pot_' . wp_generate_password( 24, false, false );
+		$job    = array(
+			'post_id'      => $post_id,
+			'target_lang'  => $target_lang,
+			'source_lang'  => $source_lang,
+			'chunks'       => self::split_post_content_into_chunks( $post->post_content ),
+			'translated'   => array(),
+			'current'      => 0,
+			'meta'         => null,
+			'created'      => time(),
+		);
+
+		set_transient( self::job_transient_key( $job_id ), $job, 6 * HOUR_IN_SECONDS );
+
+		return $job_id;
+	}
+
+	private static function get_job_post_id( string $job_id ): int {
+		$job = get_transient( self::job_transient_key( $job_id ) );
+		return is_array( $job ) && isset( $job['post_id'] ) ? absint( $job['post_id'] ) : 0;
+	}
+
+	private static function process_translation_job_step( string $job_id ) {
+		$job = get_transient( self::job_transient_key( $job_id ) );
+		if ( ! is_array( $job ) ) {
+			return new WP_Error( 'pot_missing_job', __( 'Translation job expired or was not found. Please start again.', 'polylang-openai-translator' ) );
+		}
+
+		$post_id = absint( $job['post_id'] ?? 0 );
+		if ( ! $post_id || ! current_user_can( 'edit_post', $post_id ) ) {
+			return new WP_Error( 'pot_job_permission', __( 'You cannot edit this post.', 'polylang-openai-translator' ) );
+		}
+
+		$post = get_post( $post_id );
+		if ( ! $post ) {
+			return new WP_Error( 'pot_missing_post', __( 'Source post not found.', 'polylang-openai-translator' ) );
+		}
+
+		$chunks      = is_array( $job['chunks'] ?? null ) ? $job['chunks'] : array();
+		$total_steps = count( $chunks ) + 2;
+
+		if ( empty( $job['meta'] ) ) {
+			$meta = self::request_translation( $post, (string) $job['source_lang'], (string) $job['target_lang'], true );
+			if ( is_wp_error( $meta ) ) {
+				return $meta;
+			}
+
+			$job['meta'] = array(
+				'title'   => $meta['title'],
+				'excerpt' => $meta['excerpt'],
+			);
+			set_transient( self::job_transient_key( $job_id ), $job, 6 * HOUR_IN_SECONDS );
+
+			return array(
+				'done'    => false,
+				'message' => sprintf( __( 'Translated title and excerpt. Step %1$d/%2$d.', 'polylang-openai-translator' ), 1, $total_steps ),
+			);
+		}
+
+		$chunk_keys = array_keys( $chunks );
+		$current    = absint( $job['current'] ?? 0 );
+		if ( isset( $chunk_keys[ $current ] ) ) {
+			$key    = $chunk_keys[ $current ];
+			$result = self::request_string_map_translation_chunk( array( $key => $chunks[ $key ] ), (string) $job['source_lang'], (string) $job['target_lang'] );
+			if ( is_wp_error( $result ) ) {
+				return $result;
+			}
+
+			$job['translated'][ $key ] = (string) ( $result[ $key ] ?? $chunks[ $key ] );
+			$job['current']            = $current + 1;
+			set_transient( self::job_transient_key( $job_id ), $job, 6 * HOUR_IN_SECONDS );
+
+			return array(
+				'done'    => false,
+				'message' => sprintf( __( 'Translated content chunk %1$d/%2$d.', 'polylang-openai-translator' ), $current + 1, count( $chunks ) ),
+			);
+		}
+
+		$content = '';
+		foreach ( $chunk_keys as $key ) {
+			$content .= (string) ( $job['translated'][ $key ] ?? $chunks[ $key ] );
+		}
+
+		$saved_id = self::save_translated_post(
+			$post,
+			$post_id,
+			(string) $job['source_lang'],
+			(string) $job['target_lang'],
+			array(
+				'title'   => (string) ( $job['meta']['title'] ?? get_the_title( $post ) ),
+				'excerpt' => (string) ( $job['meta']['excerpt'] ?? $post->post_excerpt ),
+				'content' => $content,
+			)
+		);
+		if ( is_wp_error( $saved_id ) ) {
+			return $saved_id;
+		}
+
+		delete_transient( self::job_transient_key( $job_id ) );
+
+		return array(
+			'done'     => true,
+			'message'  => __( 'Translation is ready. Open translated post.', 'polylang-openai-translator' ),
+			'post_id'  => $saved_id,
+			'edit_url' => get_edit_post_link( $saved_id, 'raw' ),
+		);
+	}
+
+	private static function job_transient_key( string $job_id ): string {
+		return 'pot_translate_job_' . preg_replace( '/[^a-zA-Z0-9_]/', '', $job_id );
 	}
 
 	private static function publish_linked_translations( int $post_id ) {
