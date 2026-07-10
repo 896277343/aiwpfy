@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Polylang OpenAI Translator
  * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
- * Version: 0.1.16
+ * Version: 0.1.17
  * Author: Codex
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -47,6 +47,14 @@ final class POT_Polylang_OpenAI_Translator {
 			'manage_options',
 			'pot-openai-translator',
 			array( __CLASS__, 'render_settings_page' )
+		);
+
+		add_management_page(
+			__( 'OpenAI Batch Translator', 'polylang-openai-translator' ),
+			__( 'OpenAI Batch Translator', 'polylang-openai-translator' ),
+			'edit_pages',
+			'pot-openai-batch-translator',
+			array( __CLASS__, 'render_batch_page' )
 		);
 	}
 
@@ -168,6 +176,218 @@ final class POT_Polylang_OpenAI_Translator {
 				<?php submit_button(); ?>
 			</form>
 		</div>
+		<?php
+	}
+
+	public static function render_batch_page(): void {
+		if ( ! current_user_can( 'edit_pages' ) ) {
+			return;
+		}
+
+		if ( ! self::has_polylang() ) {
+			echo '<div class="wrap"><h1>' . esc_html__( 'OpenAI Batch Translator', 'polylang-openai-translator' ) . '</h1><p>' . esc_html__( 'Polylang is not active.', 'polylang-openai-translator' ) . '</p></div>';
+			return;
+		}
+
+		$pages = get_posts(
+			array(
+				'post_type'      => 'page',
+				'post_status'    => array( 'publish', 'draft', 'pending', 'private' ),
+				'posts_per_page' => 500,
+				'orderby'        => 'title',
+				'order'          => 'ASC',
+			)
+		);
+
+		$slugs = pll_languages_list( array( 'fields' => 'slug' ) );
+		$names = pll_languages_list( array( 'fields' => 'name' ) );
+		$items = array();
+
+		foreach ( $pages as $page ) {
+			if ( ! current_user_can( 'edit_post', $page->ID ) ) {
+				continue;
+			}
+
+			$current_lang = pll_get_post_language( $page->ID, 'slug' );
+			if ( empty( $current_lang ) && function_exists( 'pll_default_language' ) ) {
+				$current_lang = pll_default_language( 'slug' );
+			}
+
+			$targets = array();
+			foreach ( $slugs as $index => $slug ) {
+				if ( $slug === $current_lang ) {
+					continue;
+				}
+				$targets[] = array(
+					'slug'  => $slug,
+					'label' => $names[ $index ] ?? $slug,
+				);
+			}
+
+			$items[] = array(
+				'id'      => $page->ID,
+				'title'   => get_the_title( $page ),
+				'lang'    => $current_lang,
+				'nonce'   => wp_create_nonce( self::NONCE_ACTION . '_' . $page->ID ),
+				'targets' => $targets,
+			);
+		}
+		?>
+		<div class="wrap">
+			<h1><?php esc_html_e( 'OpenAI Batch Translator', 'polylang-openai-translator' ); ?></h1>
+			<p><?php esc_html_e( 'Select pages, translate each one to all other Polylang languages, then publish linked translations automatically.', 'polylang-openai-translator' ); ?></p>
+			<p>
+				<button type="button" class="button" id="pot-batch-select-all"><?php esc_html_e( 'Select all', 'polylang-openai-translator' ); ?></button>
+				<button type="button" class="button" id="pot-batch-clear"><?php esc_html_e( 'Clear', 'polylang-openai-translator' ); ?></button>
+				<button type="button" class="button button-primary" id="pot-batch-start"><?php esc_html_e( 'Translate selected and publish', 'polylang-openai-translator' ); ?></button>
+			</p>
+			<div id="pot-batch-status" style="margin:12px 0; min-height:24px;"></div>
+			<table class="widefat striped">
+				<thead>
+					<tr>
+						<td class="check-column"><input type="checkbox" id="pot-batch-toggle" /></td>
+						<th><?php esc_html_e( 'Page', 'polylang-openai-translator' ); ?></th>
+						<th><?php esc_html_e( 'Source language', 'polylang-openai-translator' ); ?></th>
+						<th><?php esc_html_e( 'Target languages', 'polylang-openai-translator' ); ?></th>
+					</tr>
+				</thead>
+				<tbody>
+					<?php foreach ( $items as $item ) : ?>
+						<tr>
+							<th class="check-column">
+								<input type="checkbox" class="pot-batch-page" value="<?php echo esc_attr( (string) $item['id'] ); ?>" />
+							</th>
+							<td>
+								<a href="<?php echo esc_url( get_edit_post_link( $item['id'] ) ); ?>"><?php echo esc_html( $item['title'] ); ?></a>
+							</td>
+							<td><?php echo esc_html( $item['lang'] ?: '-' ); ?></td>
+							<td><?php echo esc_html( implode( ', ', wp_list_pluck( $item['targets'], 'label' ) ) ); ?></td>
+						</tr>
+					<?php endforeach; ?>
+				</tbody>
+			</table>
+		</div>
+		<script>
+			(function () {
+				const pages = <?php echo wp_json_encode( $items, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ); ?>;
+				const byId = new Map(pages.map(function (page) { return [String(page.id), page]; }));
+				const status = document.getElementById('pot-batch-status');
+				const start = document.getElementById('pot-batch-start');
+				const selectAll = document.getElementById('pot-batch-select-all');
+				const clear = document.getElementById('pot-batch-clear');
+				const toggle = document.getElementById('pot-batch-toggle');
+
+				function boxes() {
+					return Array.from(document.querySelectorAll('.pot-batch-page'));
+				}
+
+				function setChecked(value) {
+					boxes().forEach(function (box) { box.checked = value; });
+					if (toggle) {
+						toggle.checked = value;
+					}
+				}
+
+				if (selectAll) {
+					selectAll.addEventListener('click', function () { setChecked(true); });
+				}
+				if (clear) {
+					clear.addEventListener('click', function () { setChecked(false); });
+				}
+				if (toggle) {
+					toggle.addEventListener('change', function () { setChecked(toggle.checked); });
+				}
+
+				start.addEventListener('click', async function () {
+					const selected = boxes().filter(function (box) { return box.checked; }).map(function (box) { return byId.get(String(box.value)); }).filter(Boolean);
+					if (!selected.length) {
+						status.textContent = '<?php echo esc_js( __( 'Select at least one page.', 'polylang-openai-translator' ) ); ?>';
+						return;
+					}
+
+					start.disabled = true;
+					let translatedLanguages = 0;
+					try {
+						for (let pageIndex = 0; pageIndex < selected.length; pageIndex++) {
+							const page = selected[pageIndex];
+							for (let langIndex = 0; langIndex < page.targets.length; langIndex++) {
+								const target = page.targets[langIndex];
+								status.textContent = 'Page ' + (pageIndex + 1) + '/' + selected.length + ': ' + page.title + ' -> ' + target.label;
+								await translatePageLanguage(page, target);
+								translatedLanguages++;
+							}
+							status.textContent = 'Publishing translations for: ' + page.title;
+							await publishPageTranslations(page);
+						}
+						status.textContent = 'Done. Translated ' + translatedLanguages + ' page-language jobs and published linked translations.';
+					} catch (error) {
+						status.textContent = error.message + ' Completed page-language jobs: ' + translatedLanguages;
+					} finally {
+						start.disabled = false;
+					}
+				});
+
+				async function translatePageLanguage(page, target) {
+					const payload = await postAjax({
+						action: 'pot_translate_post',
+						nonce: page.nonce,
+						post_id: page.id,
+						target_lang: target.slug
+					});
+
+					if (payload.data && payload.data.job_id) {
+						await runJob(page, payload.data.job_id);
+					}
+				}
+
+				async function runJob(page, jobId) {
+					let payload;
+					do {
+						payload = await postAjax({
+							action: 'pot_translate_job_step',
+							nonce: page.nonce,
+							job_id: jobId
+						});
+						if (payload.data && payload.data.message) {
+							status.textContent = page.title + ': ' + payload.data.message;
+						}
+					} while (payload.data && !payload.data.done);
+				}
+
+				async function publishPageTranslations(page) {
+					await postAjax({
+						action: 'pot_publish_translations',
+						nonce: page.nonce,
+						post_id: page.id
+					});
+				}
+
+				async function postAjax(values) {
+					const body = new URLSearchParams();
+					Object.keys(values).forEach(function (key) {
+						body.set(key, values[key]);
+					});
+
+					const response = await fetch(ajaxurl, {
+						method: 'POST',
+						credentials: 'same-origin',
+						headers: {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
+						body: body.toString()
+					});
+					const raw = await response.text();
+					let payload;
+					try {
+						payload = JSON.parse(raw);
+					} catch (error) {
+						throw new Error('Server returned non-JSON response (' + response.status + '): ' + raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300));
+					}
+					if (!payload.success) {
+						throw new Error(payload.data && payload.data.message ? payload.data.message : 'Request failed.');
+					}
+					return payload;
+				}
+			})();
+		</script>
 		<?php
 	}
 
