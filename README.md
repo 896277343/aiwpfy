@@ -12,6 +12,7 @@ A small WordPress plugin that works alongside Polylang to translate posts, pages
 - Can translate the current post to all configured target languages sequentially from the editor box.
 - Can publish all linked translated drafts from the editor box after review.
 - Adds `Tools -> OpenAI Batch Translator` for selecting multiple pages, translating them to all target languages, and publishing the linked translations automatically.
+- Supports GeneratePress Premium Elements (`gp_elements`) in the editor box and batch translator, including GeneratePress element metadata copying.
 - Uses Polylang APIs to set the target language and link translations.
 - Preserves Gutenberg block comments, HTML, shortcodes, URLs, product codes, featured image, page template, and public taxonomy terms where possible.
 - Translates Elementor page content stored in `_elementor_data` while preserving Elementor sections, widgets, IDs, images, links, and style settings.
@@ -52,6 +53,8 @@ Use `Translate all languages` to translate the current post to every other Polyl
 Use `Publish all translations` after review to publish linked translated posts in one click. The source post is not changed.
 
 Use `Tools -> OpenAI Batch Translator` to process multiple pages. The batch runner is browser-driven and processes one page-language job at a time; long pages use the same step job mode as the editor button, then publish linked translations for each completed source page.
+
+For GeneratePress Premium Elements, enable the `gp_elements`/Elements post type in Polylang's custom post type translation settings when available. The plugin copies GeneratePress element settings such as hook/display metadata to the translated Element.
 
 ## Notes
 

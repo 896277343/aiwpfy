@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Polylang OpenAI Translator
  * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
- * Version: 0.1.17
+ * Version: 0.1.18
  * Author: Codex
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -73,9 +73,9 @@ final class POT_Polylang_OpenAI_Translator {
 			return;
 		}
 
-		$post_types = get_post_types( array( 'public' => true ), 'names' );
+		$post_types = self::get_supported_post_types();
 		foreach ( $post_types as $post_type ) {
-			if ( function_exists( 'pll_is_translated_post_type' ) && ! pll_is_translated_post_type( $post_type ) ) {
+			if ( 'gp_elements' !== $post_type && function_exists( 'pll_is_translated_post_type' ) && ! pll_is_translated_post_type( $post_type ) ) {
 				continue;
 			}
 
@@ -88,6 +88,16 @@ final class POT_Polylang_OpenAI_Translator {
 				'default'
 			);
 		}
+	}
+
+	private static function get_supported_post_types(): array {
+		$post_types = get_post_types( array( 'public' => true ), 'names' );
+
+		if ( post_type_exists( 'gp_elements' ) ) {
+			$post_types['gp_elements'] = 'gp_elements';
+		}
+
+		return array_values( array_unique( $post_types ) );
 	}
 
 	public static function render_settings_page(): void {
@@ -189,9 +199,14 @@ final class POT_Polylang_OpenAI_Translator {
 			return;
 		}
 
+		$batch_post_types = array( 'page' );
+		if ( post_type_exists( 'gp_elements' ) ) {
+			$batch_post_types[] = 'gp_elements';
+		}
+
 		$pages = get_posts(
 			array(
-				'post_type'      => 'page',
+				'post_type'      => $batch_post_types,
 				'post_status'    => array( 'publish', 'draft', 'pending', 'private' ),
 				'posts_per_page' => 500,
 				'orderby'        => 'title',
@@ -224,9 +239,11 @@ final class POT_Polylang_OpenAI_Translator {
 				);
 			}
 
+			$post_type_object = get_post_type_object( $page->post_type );
 			$items[] = array(
 				'id'      => $page->ID,
 				'title'   => get_the_title( $page ),
+				'type'    => $post_type_object ? $post_type_object->labels->singular_name : $page->post_type,
 				'lang'    => $current_lang,
 				'nonce'   => wp_create_nonce( self::NONCE_ACTION . '_' . $page->ID ),
 				'targets' => $targets,
@@ -247,6 +264,7 @@ final class POT_Polylang_OpenAI_Translator {
 					<tr>
 						<td class="check-column"><input type="checkbox" id="pot-batch-toggle" /></td>
 						<th><?php esc_html_e( 'Page', 'polylang-openai-translator' ); ?></th>
+						<th><?php esc_html_e( 'Type', 'polylang-openai-translator' ); ?></th>
 						<th><?php esc_html_e( 'Source language', 'polylang-openai-translator' ); ?></th>
 						<th><?php esc_html_e( 'Target languages', 'polylang-openai-translator' ); ?></th>
 					</tr>
@@ -260,6 +278,7 @@ final class POT_Polylang_OpenAI_Translator {
 							<td>
 								<a href="<?php echo esc_url( get_edit_post_link( $item['id'] ) ); ?>"><?php echo esc_html( $item['title'] ); ?></a>
 							</td>
+							<td><?php echo esc_html( $item['type'] ); ?></td>
 							<td><?php echo esc_html( $item['lang'] ?: '-' ); ?></td>
 							<td><?php echo esc_html( implode( ', ', wp_list_pluck( $item['targets'], 'label' ) ) ); ?></td>
 						</tr>
@@ -884,7 +903,7 @@ final class POT_Polylang_OpenAI_Translator {
 			'post_title'   => $translation['title'],
 			'post_content' => $translation['content'],
 			'post_excerpt' => $translation['excerpt'],
-			'post_status'  => 'draft',
+			'post_status'  => self::get_initial_translation_status( $post ),
 			'post_type'    => $post->post_type,
 			'post_author'  => $post->post_author,
 		);
@@ -919,6 +938,14 @@ final class POT_Polylang_OpenAI_Translator {
 		pll_save_post_translations( array_filter( $translations ) );
 
 		return $saved_id;
+	}
+
+	private static function get_initial_translation_status( WP_Post $post ): string {
+		if ( 'gp_elements' === $post->post_type ) {
+			return $post->post_status;
+		}
+
+		return 'draft';
 	}
 
 	private static function maybe_create_translation_job( int $post_id, string $target_lang ) {
@@ -1744,6 +1771,7 @@ final class POT_Polylang_OpenAI_Translator {
 		}
 
 		self::copy_elementor_support_meta( $source_id, $target_id );
+		self::copy_generatepress_element_meta( $source_id, $target_id );
 
 		self::copy_terms( $source_id, $target_id, $target_lang );
 
@@ -1884,6 +1912,24 @@ final class POT_Polylang_OpenAI_Translator {
 		}
 
 		delete_post_meta( $target_id, '_elementor_css' );
+	}
+
+	private static function copy_generatepress_element_meta( int $source_id, int $target_id ): void {
+		if ( 'gp_elements' !== get_post_type( $source_id ) ) {
+			return;
+		}
+
+		$all_meta = get_post_meta( $source_id );
+		foreach ( $all_meta as $meta_key => $values ) {
+			if ( 0 !== strpos( $meta_key, '_generate_' ) && 0 !== strpos( $meta_key, 'generate_' ) ) {
+				continue;
+			}
+
+			delete_post_meta( $target_id, $meta_key );
+			foreach ( $values as $value ) {
+				add_post_meta( $target_id, $meta_key, maybe_unserialize( $value ) );
+			}
+		}
 	}
 
 	private static function copy_terms( int $source_id, int $target_id, string $target_lang ): void {
