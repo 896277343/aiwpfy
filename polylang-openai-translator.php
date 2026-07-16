@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Polylang OpenAI Translator
  * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
- * Version: 0.1.20
+ * Version: 0.1.21
  * Author: Codex
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -2078,8 +2078,7 @@ final class POT_Polylang_OpenAI_Translator {
 			}
 		}
 
-		self::refresh_generateblocks_css( $target_id );
-		self::touch_generatepress_element( $target_id );
+		self::refresh_generatepress_element_cache( $target_id );
 	}
 
 	private static function is_skipped_generatepress_element_meta_key( string $meta_key ): bool {
@@ -2100,28 +2099,18 @@ final class POT_Polylang_OpenAI_Translator {
 		return false;
 	}
 
-	private static function refresh_generateblocks_css( int $post_id ): void {
+	private static function refresh_generatepress_element_cache( int $post_id ): void {
 		if ( function_exists( 'wp_cache_delete' ) ) {
 			wp_cache_delete( $post_id, 'posts' );
 			wp_cache_delete( $post_id, 'post_meta' );
 		}
-	}
 
-	private static function touch_generatepress_element( int $post_id ): void {
-		$post = get_post( $post_id );
-		if ( ! $post || 'gp_elements' !== $post->post_type ) {
-			return;
+		clean_post_cache( $post_id );
+
+		foreach ( array( 'generate_elements', 'generate_dynamic_elements', 'generate_hook_elements' ) as $transient ) {
+			delete_transient( $transient );
+			delete_site_transient( $transient );
 		}
-
-		clean_post_cache( $post_id );
-		wp_update_post(
-			array(
-				'ID'                => $post_id,
-				'post_modified'     => current_time( 'mysql' ),
-				'post_modified_gmt' => current_time( 'mysql', true ),
-			)
-		);
-		clean_post_cache( $post_id );
 	}
 
 	private static function copy_terms( int $source_id, int $target_id, string $target_lang ): void {
