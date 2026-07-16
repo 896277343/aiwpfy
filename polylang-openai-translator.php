@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Polylang OpenAI Translator
  * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
- * Version: 0.1.18
+ * Version: 0.1.19
  * Author: Codex
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -954,6 +954,10 @@ final class POT_Polylang_OpenAI_Translator {
 			return '';
 		}
 
+		if ( self::should_preserve_markup_translation( $post ) ) {
+			return '';
+		}
+
 		$available_langs = pll_languages_list( array( 'fields' => 'slug' ) );
 		if ( ! in_array( $target_lang, $available_langs, true ) ) {
 			return new WP_Error( 'pot_bad_language', __( 'Target language is not configured in Polylang.', 'polylang-openai-translator' ) );
@@ -1193,11 +1197,12 @@ final class POT_Polylang_OpenAI_Translator {
 			return new WP_Error( 'pot_missing_api_key', __( 'OpenAI API key is missing.', 'polylang-openai-translator' ) );
 		}
 
-		$should_chunk_content = ! $skip_content && self::should_chunk_post_content( $post->post_content );
+		$should_preserve_markup = ! $skip_content && self::should_preserve_markup_translation( $post );
+		$should_chunk_content   = ! $skip_content && ! $should_preserve_markup && self::should_chunk_post_content( $post->post_content );
 		$payload = array(
 			'title'   => get_the_title( $post ),
 			'excerpt' => $post->post_excerpt,
-			'content' => ( $skip_content || $should_chunk_content ) ? '' : $post->post_content,
+			'content' => ( $skip_content || $should_chunk_content || $should_preserve_markup ) ? '' : $post->post_content,
 		);
 
 		$instructions = self::build_instructions( $source_lang, $target_lang, $options['custom_instructions'] );
@@ -1226,6 +1231,13 @@ final class POT_Polylang_OpenAI_Translator {
 		}
 
 		$content = $skip_content ? $post->post_content : (string) ( $translation['content'] ?? '' );
+		if ( $should_preserve_markup ) {
+			$content = self::request_markup_text_translation( $post->post_content, $source_lang, $target_lang );
+			if ( is_wp_error( $content ) ) {
+				return $content;
+			}
+		}
+
 		if ( $should_chunk_content ) {
 			$content = self::request_chunked_content_translation( $post->post_content, $source_lang, $target_lang );
 			if ( is_wp_error( $content ) ) {
@@ -1242,6 +1254,119 @@ final class POT_Polylang_OpenAI_Translator {
 
 	private static function should_chunk_post_content( string $content ): bool {
 		return strlen( $content ) > 6000 || ( function_exists( 'has_blocks' ) && has_blocks( $content ) && strlen( $content ) > 3000 );
+	}
+
+	private static function should_preserve_markup_translation( WP_Post $post ): bool {
+		return 'gp_elements' === $post->post_type;
+	}
+
+	private static function request_markup_text_translation( string $content, string $source_lang, string $target_lang ) {
+		$segments = self::extract_markup_text_segments( $content );
+		if ( empty( $segments ) ) {
+			return $content;
+		}
+
+		$translations = array();
+		$batch        = array();
+		$batch_size   = 0;
+		$batch_index  = 1;
+
+		foreach ( $segments as $segment ) {
+			$batch_key             = 'text_' . $batch_index;
+			$batch[ $batch_key ]   = $segment;
+			$batch_size           += strlen( $segment );
+			$translations[ $segment ] = null;
+			$batch_index++;
+
+			if ( count( $batch ) >= 80 || $batch_size >= 4000 ) {
+				$result = self::request_string_map_translation( $batch, $source_lang, $target_lang );
+				if ( is_wp_error( $result ) ) {
+					return $result;
+				}
+
+				foreach ( $batch as $key => $value ) {
+					$translations[ $value ] = (string) ( $result[ $key ] ?? $value );
+				}
+
+				$batch      = array();
+				$batch_size = 0;
+			}
+		}
+
+		if ( ! empty( $batch ) ) {
+			$result = self::request_string_map_translation( $batch, $source_lang, $target_lang );
+			if ( is_wp_error( $result ) ) {
+				return $result;
+			}
+
+			foreach ( $batch as $key => $value ) {
+				$translations[ $value ] = (string) ( $result[ $key ] ?? $value );
+			}
+		}
+
+		return self::replace_markup_text_segments( $content, $translations );
+	}
+
+	private static function extract_markup_text_segments( string $content ): array {
+		$tokens   = preg_split( '/(<!--[\s\S]*?-->|<[^>]+>)/', $content, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY );
+		$segments = array();
+
+		foreach ( (array) $tokens as $token ) {
+			if ( '' === $token || '<' === $token[0] ) {
+				continue;
+			}
+
+			if ( ! self::is_translatable_text_segment( $token ) ) {
+				continue;
+			}
+
+			$segments[] = $token;
+		}
+
+		return array_values( array_unique( $segments ) );
+	}
+
+	private static function replace_markup_text_segments( string $content, array $translations ): string {
+		$tokens = preg_split( '/(<!--[\s\S]*?-->|<[^>]+>)/', $content, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY );
+		if ( ! is_array( $tokens ) ) {
+			return $content;
+		}
+
+		foreach ( $tokens as $index => $token ) {
+			if ( '' === $token || '<' === $token[0] || ! array_key_exists( $token, $translations ) ) {
+				continue;
+			}
+
+			$leading  = '';
+			$trailing = '';
+			if ( preg_match( '/^\s+/u', $token, $match ) ) {
+				$leading = $match[0];
+			}
+			if ( preg_match( '/\s+$/u', $token, $match ) ) {
+				$trailing = $match[0];
+			}
+
+			$tokens[ $index ] = $leading . trim( (string) $translations[ $token ] ) . $trailing;
+		}
+
+		return implode( '', $tokens );
+	}
+
+	private static function is_translatable_text_segment( string $text ): bool {
+		$plain = trim( wp_strip_all_tags( html_entity_decode( $text, ENT_QUOTES | ENT_HTML5, get_bloginfo( 'charset' ) ) ) );
+		if ( '' === $plain ) {
+			return false;
+		}
+
+		if ( preg_match( '/^[\d\s\+\-\(\)\.:,\/#@]+$/u', $plain ) ) {
+			return false;
+		}
+
+		if ( preg_match( '/^(https?:\/\/|mailto:|tel:|[\w.+-]+@[\w.-]+\.[a-z]{2,})/i', $plain ) ) {
+			return false;
+		}
+
+		return true;
 	}
 
 	private static function request_chunked_content_translation( string $content, string $source_lang, string $target_lang ) {
@@ -1921,7 +2046,7 @@ final class POT_Polylang_OpenAI_Translator {
 
 		$all_meta = get_post_meta( $source_id );
 		foreach ( $all_meta as $meta_key => $values ) {
-			if ( 0 !== strpos( $meta_key, '_generate_' ) && 0 !== strpos( $meta_key, 'generate_' ) ) {
+			if ( ! self::is_generatepress_element_meta_key( $meta_key ) ) {
 				continue;
 			}
 
@@ -1929,6 +2054,36 @@ final class POT_Polylang_OpenAI_Translator {
 			foreach ( $values as $value ) {
 				add_post_meta( $target_id, $meta_key, maybe_unserialize( $value ) );
 			}
+		}
+
+		self::refresh_generateblocks_css( $target_id );
+	}
+
+	private static function is_generatepress_element_meta_key( string $meta_key ): bool {
+		$prefixes = array(
+			'_generate_',
+			'generate_',
+			'_generatepress_',
+			'generatepress_',
+			'_generateblocks_',
+			'generateblocks_',
+			'_generate_blocks_',
+			'generate_blocks_',
+		);
+
+		foreach ( $prefixes as $prefix ) {
+			if ( 0 === strpos( $meta_key, $prefix ) ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private static function refresh_generateblocks_css( int $post_id ): void {
+		if ( function_exists( 'wp_cache_delete' ) ) {
+			wp_cache_delete( $post_id, 'posts' );
+			wp_cache_delete( $post_id, 'post_meta' );
 		}
 	}
 
