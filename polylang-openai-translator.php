@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Polylang OpenAI Translator
  * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
- * Version: 0.1.21
+ * Version: 0.1.22
  * Author: Codex
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -26,6 +26,9 @@ final class POT_Polylang_OpenAI_Translator {
 		add_action( 'wp_ajax_pot_translate_job_step', array( __CLASS__, 'ajax_translate_job_step' ) );
 		add_action( 'wp_ajax_pot_publish_translations', array( __CLASS__, 'ajax_publish_translations' ) );
 		add_filter( 'ajax_query_attachments_args', array( __CLASS__, 'maybe_show_all_media_in_editors' ), 999 );
+		add_filter( 'pll_get_post_types', array( __CLASS__, 'register_polylang_post_types' ), 10, 2 );
+		add_action( 'pre_get_posts', array( __CLASS__, 'prepare_generatepress_element_query' ), 999 );
+		add_filter( 'posts_results', array( __CLASS__, 'replace_generatepress_elements_for_current_language' ), 999, 2 );
 	}
 
 	public static function register_settings(): void {
@@ -98,6 +101,86 @@ final class POT_Polylang_OpenAI_Translator {
 		}
 
 		return array_values( array_unique( $post_types ) );
+	}
+
+	public static function register_polylang_post_types( array $post_types, $is_settings ): array {
+		if ( post_type_exists( 'gp_elements' ) ) {
+			$post_types['gp_elements'] = 'gp_elements';
+		}
+
+		return $post_types;
+	}
+
+	public static function prepare_generatepress_element_query( WP_Query $query ): void {
+		if ( is_admin() || ! self::query_includes_post_type( $query, 'gp_elements' ) ) {
+			return;
+		}
+
+		$query->set( 'suppress_filters', false );
+		$query->set( 'lang', '' );
+
+		$tax_query = $query->get( 'tax_query' );
+		if ( is_array( $tax_query ) ) {
+			$query->set( 'tax_query', self::remove_language_tax_queries( $tax_query ) );
+		}
+	}
+
+	public static function replace_generatepress_elements_for_current_language( array $posts, WP_Query $query ): array {
+		if ( is_admin() || empty( $posts ) || ! function_exists( 'pll_current_language' ) || ! function_exists( 'pll_get_post' ) ) {
+			return $posts;
+		}
+
+		if ( ! self::query_includes_post_type( $query, 'gp_elements' ) ) {
+			return $posts;
+		}
+
+		$current_lang = pll_current_language( 'slug' );
+		if ( empty( $current_lang ) ) {
+			return $posts;
+		}
+
+		$replaced = array();
+		$seen     = array();
+
+		foreach ( $posts as $post ) {
+			if ( ! $post instanceof WP_Post || 'gp_elements' !== $post->post_type ) {
+				$replaced[] = $post;
+				continue;
+			}
+
+			$translated_id = (int) pll_get_post( $post->ID, $current_lang );
+			$element       = $translated_id ? get_post( $translated_id ) : $post;
+			if ( ! $element || 'publish' !== $element->post_status ) {
+				$element = $post;
+			}
+
+			if ( isset( $seen[ $element->ID ] ) ) {
+				continue;
+			}
+
+			$seen[ $element->ID ] = true;
+			$replaced[]           = $element;
+		}
+
+		return $replaced;
+	}
+
+	private static function query_includes_post_type( WP_Query $query, string $post_type ): bool {
+		$query_post_type = $query->get( 'post_type' );
+
+		if ( empty( $query_post_type ) && $query->is_singular( $post_type ) ) {
+			return true;
+		}
+
+		if ( is_string( $query_post_type ) ) {
+			return $post_type === $query_post_type;
+		}
+
+		if ( is_array( $query_post_type ) ) {
+			return in_array( $post_type, $query_post_type, true );
+		}
+
+		return false;
 	}
 
 	public static function render_settings_page(): void {

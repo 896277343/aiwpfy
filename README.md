@@ -12,7 +12,7 @@ A small WordPress plugin that works alongside Polylang to translate posts, pages
 - Can translate the current post to all configured target languages sequentially from the editor box.
 - Can publish all linked translated drafts from the editor box after review.
 - Adds `Tools -> OpenAI Batch Translator` for selecting multiple pages, translating them to all target languages, and publishing the linked translations automatically.
-- Supports GeneratePress Premium Elements (`gp_elements`) in the editor box and batch translator, including hook/location metadata copying and GenerateBlocks metadata/CSS preservation.
+- Supports GeneratePress Premium Elements (`gp_elements`) in the editor box, batch translator, and frontend hook queries, including hook/location metadata copying and GenerateBlocks metadata/CSS preservation.
 - Uses Polylang APIs to set the target language and link translations.
 - Preserves Gutenberg block comments, HTML, shortcodes, URLs, product codes, featured image, page template, and public taxonomy terms where possible.
 - Translates Elementor page content stored in `_elementor_data` while preserving Elementor sections, widgets, IDs, images, links, and style settings.
@@ -55,6 +55,8 @@ Use `Publish all translations` after review to publish linked translated posts i
 Use `Tools -> OpenAI Batch Translator` to process multiple pages. The batch runner is browser-driven and processes one page-language job at a time; long pages use the same step job mode as the editor button, then publish linked translations for each completed source page.
 
 For GeneratePress Premium Elements, enable the `gp_elements`/Elements post type in Polylang's custom post type translation settings when available. The plugin translates only visible text inside Element markup so block classes, GenerateBlocks IDs, hook/display metadata, and frontend styling stay intact.
+
+On the frontend, GeneratePress Element queries are language-aware: the plugin lets GeneratePress find the Element set, then swaps each linked Element to the current Polylang language when a published translation exists.
 
 If a linked translation exists in the trash, the plugin restores and updates it instead of leaving Polylang pointed at a trashed translation. Batch publishing treats already-published linked translations as complete and publishes draft/private/pending/trashed linked translations where permissions allow.
 
