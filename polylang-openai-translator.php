@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Polylang OpenAI Translator
  * Description: Translate posts and pages with OpenAI, then create or update linked Polylang translations.
- * Version: 0.1.19
+ * Version: 0.1.20
  * Author: Codex
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -914,8 +914,13 @@ final class POT_Polylang_OpenAI_Translator {
 		}
 
 		if ( $translated_post ) {
+			if ( 'trash' === $translated_post->post_status ) {
+				wp_untrash_post( $translated_id );
+				$translated_post = get_post( $translated_id );
+			}
+
 			$postarr['ID']          = $translated_id;
-			$postarr['post_status'] = $translated_post->post_status;
+			$postarr['post_status'] = $translated_post ? self::get_existing_translation_status( $post, $translated_post ) : self::get_initial_translation_status( $post );
 			$saved_id              = wp_update_post( wp_slash( $postarr ), true );
 		} else {
 			$postarr['post_name'] = sanitize_title( $translation['title'] );
@@ -946,6 +951,14 @@ final class POT_Polylang_OpenAI_Translator {
 		}
 
 		return 'draft';
+	}
+
+	private static function get_existing_translation_status( WP_Post $source_post, WP_Post $translated_post ): string {
+		if ( 'trash' === $translated_post->post_status || 'auto-draft' === $translated_post->post_status ) {
+			return self::get_initial_translation_status( $source_post );
+		}
+
+		return $translated_post->post_status;
 	}
 
 	private static function maybe_create_translation_job( int $post_id, string $target_lang ) {
@@ -1112,9 +1125,18 @@ final class POT_Polylang_OpenAI_Translator {
 			}
 
 			$translation_post = get_post( $translation_id );
-			if ( ! $translation_post || 'publish' === $translation_post->post_status ) {
+			if ( ! $translation_post ) {
 				$skipped++;
 				continue;
+			}
+
+			if ( 'publish' === $translation_post->post_status ) {
+				$published++;
+				continue;
+			}
+
+			if ( 'trash' === $translation_post->post_status ) {
+				wp_untrash_post( $translation_id );
 			}
 
 			$updated = wp_update_post(
@@ -2046,7 +2068,7 @@ final class POT_Polylang_OpenAI_Translator {
 
 		$all_meta = get_post_meta( $source_id );
 		foreach ( $all_meta as $meta_key => $values ) {
-			if ( ! self::is_generatepress_element_meta_key( $meta_key ) ) {
+			if ( self::is_skipped_generatepress_element_meta_key( $meta_key ) ) {
 				continue;
 			}
 
@@ -2057,22 +2079,20 @@ final class POT_Polylang_OpenAI_Translator {
 		}
 
 		self::refresh_generateblocks_css( $target_id );
+		self::touch_generatepress_element( $target_id );
 	}
 
-	private static function is_generatepress_element_meta_key( string $meta_key ): bool {
-		$prefixes = array(
-			'_generate_',
-			'generate_',
-			'_generatepress_',
-			'generatepress_',
-			'_generateblocks_',
-			'generateblocks_',
-			'_generate_blocks_',
-			'generate_blocks_',
+	private static function is_skipped_generatepress_element_meta_key( string $meta_key ): bool {
+		$skipped_keys = array(
+			'_edit_lock',
+			'_edit_last',
+			'_wp_old_slug',
+			'_wp_trash_meta_status',
+			'_wp_trash_meta_time',
 		);
 
-		foreach ( $prefixes as $prefix ) {
-			if ( 0 === strpos( $meta_key, $prefix ) ) {
+		foreach ( $skipped_keys as $skipped_key ) {
+			if ( $meta_key === $skipped_key ) {
 				return true;
 			}
 		}
@@ -2085,6 +2105,23 @@ final class POT_Polylang_OpenAI_Translator {
 			wp_cache_delete( $post_id, 'posts' );
 			wp_cache_delete( $post_id, 'post_meta' );
 		}
+	}
+
+	private static function touch_generatepress_element( int $post_id ): void {
+		$post = get_post( $post_id );
+		if ( ! $post || 'gp_elements' !== $post->post_type ) {
+			return;
+		}
+
+		clean_post_cache( $post_id );
+		wp_update_post(
+			array(
+				'ID'                => $post_id,
+				'post_modified'     => current_time( 'mysql' ),
+				'post_modified_gmt' => current_time( 'mysql', true ),
+			)
+		);
+		clean_post_cache( $post_id );
 	}
 
 	private static function copy_terms( int $source_id, int $target_id, string $target_lang ): void {
